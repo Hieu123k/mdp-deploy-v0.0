@@ -69,14 +69,17 @@ def _get_or_create_job(db: Session, table) -> MigrationJob:
 
 
 def _count_table(db: Session, target_table: str) -> int | None:
+    # SAVEPOINT so a "relation does not exist" error rolls back only this probe and
+    # does not abort the request transaction (postgres behaviour).
     try:
-        return int(
-            db.execute(
-                text(
-                    f'SELECT count(*) FROM "{settings.ora2pg_target_schema}"."{target_table}"'
-                )
-            ).scalar_one()
-        )
+        with db.begin_nested():
+            return int(
+                db.execute(
+                    text(
+                        f'SELECT count(*) FROM "{settings.ora2pg_target_schema}"."{target_table}"'
+                    )
+                ).scalar_one()
+            )
     except Exception:
         return None
 
@@ -85,12 +88,13 @@ def _cursor_for(db: Session, target_table: str) -> str | None:
     """Best-effort read of the incremental cursor (dw_sync_schedules), if present."""
     for tbl in ("dw_sync_schedules", "inc_sync_schedules"):
         try:
-            row = db.execute(
-                text(
-                    f"SELECT last_max_cursor FROM {tbl} WHERE pg_table = :t OR table_name = :t LIMIT 1"
-                ),
-                {"t": target_table},
-            ).first()
+            with db.begin_nested():
+                row = db.execute(
+                    text(
+                        f"SELECT last_max_cursor FROM {tbl} WHERE pg_table = :t OR table_name = :t LIMIT 1"
+                    ),
+                    {"t": target_table},
+                ).first()
             if row is not None:
                 return None if row[0] is None else str(row[0])
         except Exception:
