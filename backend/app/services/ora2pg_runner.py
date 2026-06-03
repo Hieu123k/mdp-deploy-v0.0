@@ -47,9 +47,9 @@ def get_progress(run_id: str) -> dict[str, Any] | None:
         return dict(snap) if snap else None
 
 
-def _set(run_id: str, **fields: Any) -> None:
+def _set(rid: str, **fields: Any) -> None:
     with _LOCK:
-        snap = _PROGRESS.setdefault(run_id, {})
+        snap = _PROGRESS.setdefault(rid, {})
         snap.update(fields)
         snap["updated_at"] = _now()
 

@@ -54,3 +54,37 @@ def test_start_unknown_table_404(client, auth_headers):
 
 def test_dashboard_requires_auth(client):
     assert client.get("/ora2pg/tables").status_code == 401
+
+
+def test_runner_start_run_sets_pending_progress(monkeypatch):
+    """start_run must register progress without the worker thread (no docker needed)."""
+    from app.services import ora2pg_runner
+    from app.core.ora2pg_catalog import MIGRATABLE_TABLES
+
+    class _NoThread:
+        def __init__(self, *a, **k):
+            pass
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(ora2pg_runner.threading, "Thread", _NoThread)
+    ora2pg_runner.start_run("run-test-123", MIGRATABLE_TABLES[0])
+    snap = ora2pg_runner.get_progress("run-test-123")
+    assert snap is not None
+    assert snap["run_id"] == "run-test-123"
+    assert snap["status"] == "pending"
+
+
+def test_start_known_table_returns_202(client, auth_headers, monkeypatch):
+    """The trigger endpoint creates a run and returns 202 (worker stubbed out)."""
+    import app.api.ora2pg_dashboard as mod
+
+    calls = {}
+    monkeypatch.setattr(mod, "start_run", lambda run_id, table, **kw: calls.update(run_id=run_id))
+    res = client.post("/ora2pg/tables/V2_PRO_F0911/start", headers=auth_headers)
+    assert res.status_code == 202
+    body = res.json()
+    assert body["table"] == "V2_PRO_F0911"
+    assert body["run_id"]
+    assert calls.get("run_id") == body["run_id"]
