@@ -15,6 +15,24 @@ class Settings(BaseSettings):
     connection_secret_key: str = "change_me_connection_secret_key"
     postgres_password: str | None = None
 
+    # --- ora2pg Migration Dashboard v0.0 (additive; all from env, no hardcoded creds) ---
+    # Oracle JDE source. Empty on environments that cannot reach Oracle (e.g. the VPS sandbox);
+    # the dashboard fails gracefully and reports the connection error without crashing.
+    oracle_host: str = ""
+    oracle_port: str = "1521"
+    oracle_sid: str = ""
+    oracle_service_name: str = ""
+    oracle_user: str = ""
+    oracle_pwd: str = ""
+    oracle_schema: str = "SYSTEM"
+    # ora2pg container (compose service `ora2pg`, container_name overridable per project)
+    ora2pg_container: str = "tipa_ora2pg"
+    # Shared volume path where the backend writes the generated ora2pg.conf (== /config in ora2pg)
+    ora2pg_shared_dir: str = "/opt/ora2pg"
+    ora2pg_data_limit: int = 50000
+    # Target schema in MDP's own postgres (design 1B: no separate DW, no FDW)
+    ora2pg_target_schema: str = "mdp_staging"
+
     @model_validator(mode="after")
     def validate_production_settings(self) -> "Settings":
         if self.app_env != "production":

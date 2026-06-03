@@ -1,0 +1,118 @@
+# MDP-deploy v0.0 — full stack WITH the ora2pg Migration Dashboard.
+# The backend triggers ora2pg inside the `ora2pg` service (design 1B: load Oracle JDE
+# -> MDP's own postgres, schema mdp_staging). All Oracle/PG creds come from env.
+#
+# Deploy (e.g. on .63, which can reach Oracle):
+#   docker compose -f docker-compose.v0.yml --env-file .env.production -p mdp up -d --build
+# Sandbox verify (VPS, no Oracle): add -f docker-compose.sandbox.yml -p mdpdash
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ora2pg engine — idle container the backend exec's into (pinned image, creds via conf).
+  ora2pg:
+    image: ${ORA2PG_IMAGE:-georgmoser/ora2pg:24.3}
+    container_name: ${ORA2PG_CONTAINER:-tipa_ora2pg}
+    restart: unless-stopped
+    volumes:
+      - ora2pg_config:/config
+    command: ["tail", "-f", "/dev/null"]
+
+  backend:
+    build:
+      context: ./backend
+    env_file:
+      - path: .env.production
+        required: false
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      DATABASE_URL: ${DATABASE_URL}
+      CORS_ORIGINS: ${CORS_ORIGINS}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
+      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-1440}
+      CONNECTION_SECRET_KEY: ${CONNECTION_SECRET_KEY}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      # --- ora2pg dashboard wiring (all from env; empty Oracle = fail-graceful) ---
+      ORA2PG_CONTAINER: ${ORA2PG_CONTAINER:-tipa_ora2pg}
+      ORA2PG_SHARED_DIR: /opt/ora2pg
+      ORA2PG_TARGET_SCHEMA: ${ORA2PG_TARGET_SCHEMA:-mdp_staging}
+      ORACLE_HOST: ${ORACLE_HOST:-}
+      ORACLE_PORT: ${ORACLE_PORT:-1521}
+      ORACLE_SID: ${ORACLE_SID:-}
+      ORACLE_SERVICE_NAME: ${ORACLE_SERVICE_NAME:-}
+      ORACLE_USER: ${ORACLE_USER:-}
+      ORACLE_PWD: ${ORACLE_PWD:-}
+      ORACLE_SCHEMA: ${ORACLE_SCHEMA:-SYSTEM}
+    volumes:
+      # exec ora2pg in its container, and share the generated ora2pg.conf
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ora2pg_config:/opt/ora2pg
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5)\"",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-}
+    depends_on:
+      backend:
+        condition: service_started
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "node -e \"fetch('http://localhost:3000').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))\"",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  reverse-proxy:
+    image: caddy:2
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      backend:
+        condition: service_started
+      frontend:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  caddy_data:
+  caddy_config:
+  ora2pg_config:

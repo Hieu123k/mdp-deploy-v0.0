@@ -20,6 +20,7 @@ import { Input } from "@/components/ui/Input";
 import { Modal } from "@/components/ui/Modal";
 import { Select } from "@/components/ui/Select";
 import { Table, TBody, TD, TH, THead, TR } from "@/components/ui/Table";
+import { Ora2pgMigrationDashboard } from "@/components/Ora2pgMigrationDashboard";
 import {
   ApiError,
   apiPath,
@@ -1123,6 +1124,7 @@ export default function MigrationJobsPage() {
           </div>
         }
       />
+      <Ora2pgMigrationDashboard />
       <Card className="mb-4">
         <CardBody>
           <p className="text-sm text-neutral-600">

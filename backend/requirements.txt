@@ -11,4 +11,5 @@ SQLAlchemy==2.0.36
 pytest==8.3.4
 httpx==0.28.1
 oracledb==2.5.1
+docker==7.1.0
 uvicorn[standard]==0.34.0

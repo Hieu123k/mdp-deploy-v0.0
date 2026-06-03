@@ -1,0 +1,105 @@
+# Self-contained SANDBOX compose for VPS verification (no Oracle reachable).
+# Single free HTTP port (8457 by default), coexists with mdp/mdp2/mdp3. Demo data.
+#   docker compose -f docker-compose.sandbox.yml --env-file .env.sandbox -p mdpdash up -d --build
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  ora2pg:
+    image: ${ORA2PG_IMAGE:-georgmoser/ora2pg:24.3}
+    container_name: ${ORA2PG_CONTAINER:-mdpdash_ora2pg}
+    restart: unless-stopped
+    volumes:
+      - ora2pg_config:/config
+    command: ["tail", "-f", "/dev/null"]
+
+  backend:
+    build:
+      context: ./backend
+    environment:
+      APP_ENV: ${APP_ENV:-local}
+      DATABASE_URL: ${DATABASE_URL}
+      CORS_ORIGINS: '["http://localhost:8457"]'
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      CONNECTION_SECRET_KEY: ${CONNECTION_SECRET_KEY}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      ORA2PG_CONTAINER: ${ORA2PG_CONTAINER:-mdpdash_ora2pg}
+      ORA2PG_SHARED_DIR: /opt/ora2pg
+      # Oracle deliberately points at an unreachable TEST-NET address (RFC 5737) to prove
+      # fail-graceful on the VPS. Real Oracle host/sid are supplied via env only on .63.
+      ORACLE_HOST: ${ORACLE_HOST:-192.0.2.16}
+      ORACLE_PORT: ${ORACLE_PORT:-1521}
+      ORACLE_SID: ${ORACLE_SID:-DEMO}
+      ORACLE_USER: ${ORACLE_USER:-demo}
+      ORACLE_PWD: ${ORACLE_PWD:-demo}
+      ORACLE_SCHEMA: ${ORACLE_SCHEMA:-SYSTEM}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ora2pg_config:/opt/ora2pg
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5)\"",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_URL: ""
+    depends_on:
+      backend:
+        condition: service_started
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "node -e \"fetch('http://localhost:3000').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))\"",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  reverse-proxy:
+    image: caddy:2
+    ports:
+      - "${MDP_PORT:-8457}:8457"
+    volumes:
+      - ./deploy/Caddyfile.sandbox:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      backend:
+        condition: service_started
+      frontend:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  caddy_data:
+  caddy_config:
+  ora2pg_config:

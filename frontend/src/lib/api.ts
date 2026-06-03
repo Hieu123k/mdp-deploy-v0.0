@@ -695,3 +695,115 @@ export type JdeWorkflowStatus = {
 };
 export const getJdeWorkflowStatus = () =>
   req<JdeWorkflowStatus>("/demo/jde-procurement/workflow-status");
+
+// ---- Migration Dashboard v0.0 (ora2pg control + live progress) ----
+export type Ora2pgInfo = {
+  version: string;
+  ora2pg_container: string;
+  target_schema: string;
+  oracle_configured: boolean;
+  table_count: number;
+};
+export type Ora2pgTable = {
+  table: string;
+  ts_col: string;
+  label: string;
+  target_table: string;
+  target_schema: string;
+  current_rows: number | null;
+  cursor: string | null;
+  last_run_id: string | null;
+  last_run_status: string | null;
+  last_run_at: string | null;
+};
+export type Ora2pgStatusItem = {
+  table: string;
+  target: string;
+  current_rows: number | null;
+  cursor: string | null;
+  last_run_status: string | null;
+  last_run_rows: number | null;
+  last_run_at: string | null;
+  last_run_duration_sec: number | null;
+};
+export type Ora2pgProgress = {
+  run_id: string;
+  table?: string;
+  target_table?: string;
+  status: string; // pending | running | success | failed
+  phase?: string;
+  rows_done: number;
+  rows_total: number | null;
+  pct: number;
+  rows_per_sec: number;
+  elapsed_sec: number;
+  eta_sec: number | null;
+  message?: string;
+  started_at?: string | null;
+  updated_at?: string | null;
+};
+export const ora2pgInfo = () => req<Ora2pgInfo>("/ora2pg/info");
+export const ora2pgListTables = () =>
+  req<{ version: string; tables: Ora2pgTable[] }>("/ora2pg/tables");
+export const ora2pgConfigPreview = (table: string) =>
+  req<{ table: string; target: string; conf_redacted: string }>(
+    `/ora2pg/tables/${encodeURIComponent(table)}/config-preview`,
+  );
+export const ora2pgStart = (table: string, testRows = 0) =>
+  req<{ run_id: string; table: string; status: string; stream_url?: string; message?: string }>(
+    `/ora2pg/tables/${encodeURIComponent(table)}/start?test_rows=${testRows}`,
+    { method: "POST" },
+  );
+export const ora2pgGetRun = (runId: string) =>
+  req<Ora2pgProgress>(`/ora2pg/runs/${encodeURIComponent(runId)}`);
+export const ora2pgStatus = () =>
+  req<{ version: string; schema: string; tables: Ora2pgStatusItem[] }>("/ora2pg/status");
+
+/**
+ * Open the SSE progress stream for a run (auth via Bearer header, so we read the
+ * body stream manually instead of EventSource). Calls onEvent for each progress
+ * snapshot. Returns an abort function.
+ */
+export function ora2pgStreamRun(
+  runId: string,
+  onEvent: (p: Ora2pgProgress) => void,
+  onDone?: () => void,
+): () => void {
+  const ctrl = new AbortController();
+  (async () => {
+    try {
+      const res = await apiFetch(`/ora2pg/runs/${encodeURIComponent(runId)}/stream`, {
+        signal: ctrl.signal,
+        headers: { Accept: "text/event-stream" },
+      });
+      if (!res.body) return;
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let nl: number;
+        while ((nl = buf.indexOf("\n\n")) >= 0) {
+          const frame = buf.slice(0, nl);
+          buf = buf.slice(nl + 2);
+          for (const line of frame.split("\n")) {
+            if (line.startsWith("data:")) {
+              try {
+                onEvent(JSON.parse(line.slice(5).trim()) as Ora2pgProgress);
+              } catch {
+                /* ignore malformed frame */
+              }
+            }
+          }
+        }
+      }
+    } catch {
+      /* aborted or network error -> caller polls as fallback */
+    } finally {
+      onDone?.();
+    }
+  })();
+  return () => ctrl.abort();
+}

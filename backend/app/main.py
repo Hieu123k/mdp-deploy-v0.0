@@ -16,6 +16,7 @@ from app.api.inbound import router as inbound_router
 from app.api.jde_demo_workflow import router as jde_demo_workflow_router
 from app.api.migration_jobs import router as migration_jobs_router
 from app.api.migration_templates import router as migration_templates_router
+from app.api.ora2pg_dashboard import router as ora2pg_dashboard_router
 from app.api.outbound import router as outbound_router
 from app.api.transactions import router as transactions_router
 from app.api.users import router as users_router
@@ -58,6 +59,7 @@ app.include_router(api_keys_router)
 app.include_router(connections_router)
 app.include_router(migration_jobs_router)
 app.include_router(migration_templates_router)
+app.include_router(ora2pg_dashboard_router)
 app.include_router(inbound_router)
 app.include_router(outbound_router)
 app.include_router(transactions_router)
