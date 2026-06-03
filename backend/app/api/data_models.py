@@ -1,0 +1,199 @@
+import uuid
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import ValidationError
+from sqlalchemy.orm import Session
+
+from app.api.deps import get_current_user
+from app.db.session import get_db
+from app.models.data_model import DataModel
+from app.schemas.data_model import DataModelCreate, DataModelRead, DataModelUpdate
+from app.services.data_model_service import (
+    create_data_model,
+    deactivate_data_model,
+    get_data_model,
+    get_data_model_by_name,
+    list_data_models,
+    update_data_model,
+)
+from app.services.table_generator import TableGenerationError
+from app.services.type_b_mapping_service import (
+    TypeBMappingError,
+    preview_saved_type_b_model,
+    preview_type_b_mapping,
+    validate_type_b_mapping,
+)
+
+
+router = APIRouter(
+    prefix="/data-models",
+    tags=["data-models"],
+    dependencies=[Depends(get_current_user)],
+)
+
+
+def ensure_unique_name(
+    db: Session,
+    name: str | None,
+    existing_id: uuid.UUID | None = None,
+) -> None:
+    if not name:
+        return
+
+    existing = get_data_model_by_name(db, name)
+    if existing and existing.id != existing_id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Data model name is already registered",
+        )
+
+
+@router.post("", response_model=DataModelRead, status_code=status.HTTP_201_CREATED)
+def create_data_model_endpoint(
+    data_model_in: DataModelCreate,
+    db: Annotated[Session, Depends(get_db)],
+) -> DataModel:
+    ensure_unique_name(db, data_model_in.name)
+    try:
+        return create_data_model(db, data_model_in)
+    except TableGenerationError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except TypeBMappingError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=exc.errors,
+        ) from exc
+
+
+@router.get("", response_model=list[DataModelRead])
+def list_data_models_endpoint(
+    db: Annotated[Session, Depends(get_db)],
+    status_filter: Annotated[str | None, Query(alias="status")] = None,
+    type_filter: Annotated[str | None, Query(alias="type")] = None,
+    ai_enabled: bool | None = None,
+    domain: str | None = None,
+    source_layer: str | None = None,
+    canonical_status: str | None = None,
+    site_scope: str | None = None,
+) -> list[DataModel]:
+    if type_filter is not None and type_filter not in {"A", "B"}:
+        raise HTTPException(status_code=422, detail='type must be "A" or "B"')
+    return list_data_models(
+        db,
+        status=status_filter,
+        model_type=type_filter,
+        ai_enabled=ai_enabled,
+        domain=domain,
+        source_layer=source_layer,
+        canonical_status=canonical_status,
+        site_scope=site_scope,
+    )
+
+
+@router.post("/type-b/validate-mapping")
+def validate_type_b_mapping_endpoint(
+    data_model_in: DataModelCreate,
+    db: Annotated[Session, Depends(get_db)],
+) -> dict:
+    try:
+        return validate_type_b_mapping(db, data_model_in)
+    except TypeBMappingError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=exc.errors,
+        ) from exc
+
+
+@router.post("/type-b/preview")
+def preview_type_b_mapping_endpoint(
+    data_model_in: DataModelCreate,
+    db: Annotated[Session, Depends(get_db)],
+    limit: Annotated[int, Query(ge=1)] = 20,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> dict:
+    try:
+        return preview_type_b_mapping(db, data_model_in, limit=limit, offset=offset)
+    except TypeBMappingError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=exc.errors,
+        ) from exc
+
+
+@router.get("/{data_model_id}", response_model=DataModelRead)
+def get_data_model_endpoint(
+    data_model_id: uuid.UUID,
+    db: Annotated[Session, Depends(get_db)],
+) -> DataModel:
+    data_model = get_data_model(db, data_model_id)
+    if data_model is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Data model not found",
+        )
+    return data_model
+
+
+@router.get("/{data_model_id}/mapped-preview")
+def get_data_model_mapped_preview_endpoint(
+    data_model_id: uuid.UUID,
+    db: Annotated[Session, Depends(get_db)],
+    limit: Annotated[int, Query(ge=1)] = 20,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> dict:
+    data_model = get_data_model(db, data_model_id)
+    if data_model is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Data model not found",
+        )
+    try:
+        return preview_saved_type_b_model(db, data_model, limit=limit, offset=offset)
+    except TypeBMappingError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=exc.errors,
+        ) from exc
+
+
+@router.put("/{data_model_id}", response_model=DataModelRead)
+def update_data_model_endpoint(
+    data_model_id: uuid.UUID,
+    data_model_in: DataModelUpdate,
+    db: Annotated[Session, Depends(get_db)],
+) -> DataModel:
+    data_model = get_data_model(db, data_model_id)
+    if data_model is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Data model not found",
+        )
+
+    ensure_unique_name(db, data_model_in.name, existing_id=data_model.id)
+    try:
+        return update_data_model(db, data_model, data_model_in)
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=exc.errors(include_context=False),
+        ) from exc
+    except TypeBMappingError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=exc.errors,
+        ) from exc
+
+
+@router.delete("/{data_model_id}", response_model=DataModelRead)
+def deactivate_data_model_endpoint(
+    data_model_id: uuid.UUID,
+    db: Annotated[Session, Depends(get_db)],
+) -> DataModel:
+    data_model = get_data_model(db, data_model_id)
+    if data_model is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Data model not found",
+        )
+    return deactivate_data_model(db, data_model)

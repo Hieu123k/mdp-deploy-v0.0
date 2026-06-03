@@ -1,0 +1,76 @@
+from functools import lru_cache
+from typing import Literal
+
+from pydantic import model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    app_env: Literal["local", "test", "production"] = "local"
+    database_url: str = "postgresql+psycopg://mdp_user:mdp_password@postgres:5432/mdp"
+    cors_origins: list[str] = ["http://localhost:3000", "http://127.0.0.1:3000"]
+    jwt_secret_key: str = "change_me"
+    jwt_algorithm: str = "HS256"
+    access_token_expire_minutes: int = 1440
+    connection_secret_key: str = "change_me_connection_secret_key"
+    postgres_password: str | None = None
+
+    @model_validator(mode="after")
+    def validate_production_settings(self) -> "Settings":
+        if self.app_env != "production":
+            return self
+
+        invalid_settings: list[str] = []
+        placeholder_secret_values = {
+            "change_me",
+            "change_me_connection_secret_key",
+            "replace_with_very_long_random_secret_at_least_32_chars",
+        }
+
+        if not self.database_url:
+            invalid_settings.append("DATABASE_URL is required")
+        if not self.jwt_secret_key or self.jwt_secret_key in placeholder_secret_values:
+            invalid_settings.append("JWT_SECRET_KEY must be set to a non-default value")
+        elif len(self.jwt_secret_key) < 32:
+            invalid_settings.append("JWT_SECRET_KEY must be at least 32 characters")
+        if (
+            not self.connection_secret_key
+            or self.connection_secret_key in placeholder_secret_values
+        ):
+            invalid_settings.append("CONNECTION_SECRET_KEY must be set to a non-default value")
+        elif len(self.connection_secret_key) < 32:
+            invalid_settings.append("CONNECTION_SECRET_KEY must be at least 32 characters")
+        if not self.cors_origins or all(
+            "localhost" in origin or "127.0.0.1" in origin
+            for origin in self.cors_origins
+        ):
+            invalid_settings.append("CORS_ORIGINS must include the production frontend origin")
+        if self.postgres_password in {
+            "mdp_password",
+            "postgres",
+            "password",
+            "change_me",
+            "replace_with_strong_password",
+        }:
+            invalid_settings.append("POSTGRES_PASSWORD must be changed from the default value")
+
+        if invalid_settings:
+            raise ValueError(
+                "Invalid production configuration: " + "; ".join(invalid_settings)
+            )
+
+        return self
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+    )
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()
+
+
+settings = get_settings()

@@ -1,0 +1,85 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: #faf4f4;
+  --foreground: #161718;
+}
+
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+  body {
+    color: var(--foreground);
+    background: var(--background);
+    font-family: var(--font-inter), system-ui, "Segoe UI", sans-serif;
+  }
+  ::placeholder {
+    color: #a7a9ac; /* neutral-400 */
+    opacity: 1;
+  }
+  .tabular-nums,
+  table,
+  [data-numeric] {
+    font-variant-numeric: tabular-nums;
+  }
+  *:focus-visible {
+    outline: 2px solid #e01e26;
+    outline-offset: 2px;
+  }
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+
+  /* Nền trang login — đỏ rượu vang → cam đậm, gradient trượt mượt (đổi màu động). */
+  .login-bg {
+    background: linear-gradient(
+      135deg,
+      #6e1423 0%,
+      #8c1c2b 30%,
+      #c2410c 55%,
+      #8c1c2b 75%,
+      #6e1423 100%
+    );
+    background-size: 300% 300%;
+    animation: loginShift 14s ease-in-out infinite;
+  }
+}
+
+@keyframes loginShift {
+  0% {
+    background-position: 0% 50%;
+  }
+  50% {
+    background-position: 100% 50%;
+  }
+  100% {
+    background-position: 0% 50%;
+  }
+}
+
+/* Tôn trọng người dùng tắt hiệu ứng chuyển động */
+@media (prefers-reduced-motion: reduce) {
+  .login-bg {
+    animation: none;
+  }
+}
+
+.data-model-dialog {
+  width: min(92vw, 1100px) !important;
+  max-width: 1100px !important;
+  min-width: min(900px, 96vw);
+  max-height: 92vh;
+}
+
+@media (max-width: 900px) {
+  .data-model-dialog {
+    width: 96vw !important;
+    min-width: 0;
+  }
+}

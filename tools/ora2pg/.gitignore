@@ -1,0 +1,7 @@
+# Secrets & rendered config — never commit
+.env
+config/ora2pg.conf
+
+# ora2pg output dumps
+data/*
+!data/.gitkeep
