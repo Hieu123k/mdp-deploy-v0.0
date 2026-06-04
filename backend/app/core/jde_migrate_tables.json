@@ -1,0 +1,348 @@
+{
+  "spec": "JDE -> mdp_staging migration catalog (authoritative, finalized)",
+  "generated": "2026-06-04",
+  "source_file": "Reference/Phase1/JDE_9.28_Tables.xlsx (sheet: All Tables)",
+  "oracle_verified": "All 40 V2_PRO_* views verified present in the source Oracle instance (2026-06-04)",
+  "target_schema": "mdp_staging",
+  "naming_rule": "Oracle view V2_PRO_<ID>  ->  postgres mdp_staging.v2_pro_<id lowercase>",
+  "ts_col_note": "ts_col only known for F0911/F0411/F4311 (incremental); null = optional, full-load works without it",
+  "excluded_extras": [
+    "V2_PRO_F4211_TIPS",
+    "V2_PRO_F4801_TIPS",
+    "V2_PRO_F4111_HIS",
+    "V2_PRO_F4111_TIPA"
+  ],
+  "count": 40,
+  "modules": {
+    "Inventory Management": 9,
+    "Procurement & Purchasing": 8,
+    "Sales Order Management": 1,
+    "Manufacturing & Work Orders": 6,
+    "General Ledger & Finance": 4,
+    "Accounts Payable": 4,
+    "Address Book": 6,
+    "Fixed Assets": 2
+  },
+  "tables": [
+    {
+      "table_id": "F4101",
+      "source_view": "V2_PRO_F4101",
+      "target_table": "v2_pro_f4101",
+      "module": "Inventory Management",
+      "name": "Item Master",
+      "ts_col": null
+    },
+    {
+      "table_id": "F4102",
+      "source_view": "V2_PRO_F4102",
+      "target_table": "v2_pro_f4102",
+      "module": "Inventory Management",
+      "name": "Item Branch/Plant",
+      "ts_col": null
+    },
+    {
+      "table_id": "F4105",
+      "source_view": "V2_PRO_F4105",
+      "target_table": "v2_pro_f4105",
+      "module": "Inventory Management",
+      "name": "Item Cost File",
+      "ts_col": null
+    },
+    {
+      "table_id": "F4111",
+      "source_view": "V2_PRO_F4111",
+      "target_table": "v2_pro_f4111",
+      "module": "Inventory Management",
+      "name": "Item Ledger File (Cardex)",
+      "ts_col": null
+    },
+    {
+      "table_id": "F41021",
+      "source_view": "V2_PRO_F41021",
+      "target_table": "v2_pro_f41021",
+      "module": "Inventory Management",
+      "name": "Item Location File",
+      "ts_col": null
+    },
+    {
+      "table_id": "F41002",
+      "source_view": "V2_PRO_F41002",
+      "target_table": "v2_pro_f41002",
+      "module": "Inventory Management",
+      "name": "Item Units of Measure Conversion Factors",
+      "ts_col": null
+    },
+    {
+      "table_id": "F41061",
+      "source_view": "V2_PRO_F41061",
+      "target_table": "v2_pro_f41061",
+      "module": "Inventory Management",
+      "name": "Lot Master",
+      "ts_col": null
+    },
+    {
+      "table_id": "F4140",
+      "source_view": "V2_PRO_F4140",
+      "target_table": "v2_pro_f4140",
+      "module": "Inventory Management",
+      "name": "Base Price File",
+      "ts_col": null
+    },
+    {
+      "table_id": "F4141",
+      "source_view": "V2_PRO_F4141",
+      "target_table": "v2_pro_f4141",
+      "module": "Inventory Management",
+      "name": "Pricing by Detail (Advanced Pricing)",
+      "ts_col": null
+    },
+    {
+      "table_id": "F4301",
+      "source_view": "V2_PRO_F4301",
+      "target_table": "v2_pro_f4301",
+      "module": "Procurement & Purchasing",
+      "name": "Purchase Order Header",
+      "ts_col": null
+    },
+    {
+      "table_id": "F4311",
+      "source_view": "V2_PRO_F4311",
+      "target_table": "v2_pro_f4311",
+      "module": "Procurement & Purchasing",
+      "name": "Purchase Order Detail",
+      "ts_col": "pdupmj"
+    },
+    {
+      "table_id": "F43090",
+      "source_view": "V2_PRO_F43090",
+      "target_table": "v2_pro_f43090",
+      "module": "Procurement & Purchasing",
+      "name": "Purchase Order Header Tag File",
+      "ts_col": null
+    },
+    {
+      "table_id": "F43092",
+      "source_view": "V2_PRO_F43092",
+      "target_table": "v2_pro_f43092",
+      "module": "Procurement & Purchasing",
+      "name": "Purchase Order Receiver Detail",
+      "ts_col": null
+    },
+    {
+      "table_id": "F43099",
+      "source_view": "V2_PRO_F43099",
+      "target_table": "v2_pro_f43099",
+      "module": "Procurement & Purchasing",
+      "name": "Purchase Order Text Lines",
+      "ts_col": null
+    },
+    {
+      "table_id": "F43121",
+      "source_view": "V2_PRO_F43121",
+      "target_table": "v2_pro_f43121",
+      "module": "Procurement & Purchasing",
+      "name": "Purchase Receiver Tag File",
+      "ts_col": null
+    },
+    {
+      "table_id": "F43199",
+      "source_view": "V2_PRO_F43199",
+      "target_table": "v2_pro_f43199",
+      "module": "Procurement & Purchasing",
+      "name": "Purchase Receiver Detail Tag File",
+      "ts_col": null
+    },
+    {
+      "table_id": "F4008",
+      "source_view": "V2_PRO_F4008",
+      "target_table": "v2_pro_f4008",
+      "module": "Procurement & Purchasing",
+      "name": "Purchasing Instructions (Item/Supplier)",
+      "ts_col": null
+    },
+    {
+      "table_id": "F4211",
+      "source_view": "V2_PRO_F4211",
+      "target_table": "v2_pro_f4211",
+      "module": "Sales Order Management",
+      "name": "Sales Order Detail",
+      "ts_col": null
+    },
+    {
+      "table_id": "F4801",
+      "source_view": "V2_PRO_F4801",
+      "target_table": "v2_pro_f4801",
+      "module": "Manufacturing & Work Orders",
+      "name": "Work Order Master File",
+      "ts_col": null
+    },
+    {
+      "table_id": "F3002",
+      "source_view": "V2_PRO_F3002",
+      "target_table": "v2_pro_f3002",
+      "module": "Manufacturing & Work Orders",
+      "name": "Work Order Parts List",
+      "ts_col": null
+    },
+    {
+      "table_id": "F30026",
+      "source_view": "V2_PRO_F30026",
+      "target_table": "v2_pro_f30026",
+      "module": "Manufacturing & Work Orders",
+      "name": "Item Cost Component Add-Ons",
+      "ts_col": null
+    },
+    {
+      "table_id": "F3003",
+      "source_view": "V2_PRO_F3003",
+      "target_table": "v2_pro_f3003",
+      "module": "Manufacturing & Work Orders",
+      "name": "Work Order Routing",
+      "ts_col": null
+    },
+    {
+      "table_id": "F3111",
+      "source_view": "V2_PRO_F3111",
+      "target_table": "v2_pro_f3111",
+      "module": "Manufacturing & Work Orders",
+      "name": "Work Order Parts List Detail",
+      "ts_col": null
+    },
+    {
+      "table_id": "F3112",
+      "source_view": "V2_PRO_F3112",
+      "target_table": "v2_pro_f3112",
+      "module": "Manufacturing & Work Orders",
+      "name": "Work Order Time Transactions",
+      "ts_col": null
+    },
+    {
+      "table_id": "F0901",
+      "source_view": "V2_PRO_F0901",
+      "target_table": "v2_pro_f0901",
+      "module": "General Ledger & Finance",
+      "name": "Account Master",
+      "ts_col": null
+    },
+    {
+      "table_id": "F0902",
+      "source_view": "V2_PRO_F0902",
+      "target_table": "v2_pro_f0902",
+      "module": "General Ledger & Finance",
+      "name": "Account Balances",
+      "ts_col": null
+    },
+    {
+      "table_id": "F0911",
+      "source_view": "V2_PRO_F0911",
+      "target_table": "v2_pro_f0911",
+      "module": "General Ledger & Finance",
+      "name": "Account Ledger",
+      "ts_col": "upmj"
+    },
+    {
+      "table_id": "F0006",
+      "source_view": "V2_PRO_F0006",
+      "target_table": "v2_pro_f0006",
+      "module": "General Ledger & Finance",
+      "name": "Business Unit Master",
+      "ts_col": null
+    },
+    {
+      "table_id": "F0411",
+      "source_view": "V2_PRO_F0411",
+      "target_table": "v2_pro_f0411",
+      "module": "Accounts Payable",
+      "name": "Accounts Payable Ledger",
+      "ts_col": "rpupmj"
+    },
+    {
+      "table_id": "F0401",
+      "source_view": "V2_PRO_F0401",
+      "target_table": "v2_pro_f0401",
+      "module": "Accounts Payable",
+      "name": "Supplier Master (A/P)",
+      "ts_col": null
+    },
+    {
+      "table_id": "F0015",
+      "source_view": "V2_PRO_F0015",
+      "target_table": "v2_pro_f0015",
+      "module": "Accounts Payable",
+      "name": "Bank Account Cross-Reference",
+      "ts_col": null
+    },
+    {
+      "table_id": "F0030",
+      "source_view": "V2_PRO_F0030",
+      "target_table": "v2_pro_f0030",
+      "module": "Accounts Payable",
+      "name": "Bank Transit Master",
+      "ts_col": null
+    },
+    {
+      "table_id": "F0101",
+      "source_view": "V2_PRO_F0101",
+      "target_table": "v2_pro_f0101",
+      "module": "Address Book",
+      "name": "Address Book Master",
+      "ts_col": null
+    },
+    {
+      "table_id": "F0111",
+      "source_view": "V2_PRO_F0111",
+      "target_table": "v2_pro_f0111",
+      "module": "Address Book",
+      "name": "Address Book — Who's Who",
+      "ts_col": null
+    },
+    {
+      "table_id": "F0115",
+      "source_view": "V2_PRO_F0115",
+      "target_table": "v2_pro_f0115",
+      "module": "Address Book",
+      "name": "Address Book — Phone Numbers",
+      "ts_col": null
+    },
+    {
+      "table_id": "F0116",
+      "source_view": "V2_PRO_F0116",
+      "target_table": "v2_pro_f0116",
+      "module": "Address Book",
+      "name": "Address by Date",
+      "ts_col": null
+    },
+    {
+      "table_id": "F01151",
+      "source_view": "V2_PRO_F01151",
+      "target_table": "v2_pro_f01151",
+      "module": "Address Book",
+      "name": "Electronic Address",
+      "ts_col": null
+    },
+    {
+      "table_id": "F00165",
+      "source_view": "V2_PRO_F00165",
+      "target_table": "v2_pro_f00165",
+      "module": "Address Book",
+      "name": "Address Book Tag File",
+      "ts_col": null
+    },
+    {
+      "table_id": "F1201",
+      "source_view": "V2_PRO_F1201",
+      "target_table": "v2_pro_f1201",
+      "module": "Fixed Assets",
+      "name": "Asset Master File",
+      "ts_col": null
+    },
+    {
+      "table_id": "F1202",
+      "source_view": "V2_PRO_F1202",
+      "target_table": "v2_pro_f1202",
+      "module": "Fixed Assets",
+      "name": "Asset Balance",
+      "ts_col": null
+    }
+  ]
+}

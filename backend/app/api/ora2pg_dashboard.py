@@ -154,6 +154,7 @@ def list_tables(db: Annotated[Session, Depends(get_db)]) -> dict[str, Any]:
             "table": t.table,
             "ts_col": t.ts_col,
             "label": t.label,
+            "module": t.module,
             "target_table": t.target_table,
             "target_schema": settings.ora2pg_target_schema,
             "current_rows": _count_table(db, t.target_table),
@@ -260,6 +261,7 @@ def db_status(db: Annotated[Session, Depends(get_db)]) -> dict[str, Any]:
         last = _latest_run(db, job.id) if job else None
         items.append({
             "table": t.table,
+            "module": t.module,
             "target": f"{settings.ora2pg_target_schema}.{t.target_table}",
             "current_rows": _count_table(db, t.target_table),
             "cursor": _cursor_for(db, t.target_table),

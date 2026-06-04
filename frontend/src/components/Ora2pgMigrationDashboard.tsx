@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Database, Play, RefreshCw, Terminal } from "lucide-react";
 import { Badge, type BadgeTone } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
@@ -158,6 +158,21 @@ export function Ora2pgMigrationDashboard() {
     }
   };
 
+  // Group tables by Module (preserving the catalog/JSON order) for <optgroup> + status rows.
+  const moduleGroups = useMemo(() => {
+    const order: string[] = [];
+    const byModule = new Map<string, Ora2pgTable[]>();
+    for (const t of tables) {
+      const mod = t.module || "Other";
+      if (!byModule.has(mod)) {
+        byModule.set(mod, []);
+        order.push(mod);
+      }
+      byModule.get(mod)!.push(t);
+    }
+    return order.map((mod) => ({ module: mod, items: byModule.get(mod)! }));
+  }, [tables]);
+
   const pct = Math.min(100, Math.max(0, progress?.pct ?? 0));
 
   return (
@@ -193,10 +208,15 @@ export function Ora2pgMigrationDashboard() {
               onChange={(e) => setSelected(e.target.value)}
               disabled={busy}
             >
-              {tables.map((t) => (
-                <option key={t.table} value={t.table}>
-                  {t.label} · {t.table} (ts: {t.ts_col})
-                </option>
+              {moduleGroups.map((g) => (
+                <optgroup key={g.module} label={g.module}>
+                  {g.items.map((t) => (
+                    <option key={t.table} value={t.table}>
+                      {t.label} · {t.table}
+                      {t.ts_col ? ` (ts: ${t.ts_col})` : ""}
+                    </option>
+                  ))}
+                </optgroup>
               ))}
             </Select>
           </div>
@@ -278,6 +298,7 @@ export function Ora2pgMigrationDashboard() {
           <Table>
             <THead>
               <TR>
+                <TH>Module</TH>
                 <TH>Table</TH>
                 <TH>Target</TH>
                 <TH>Current rows</TH>
@@ -288,6 +309,7 @@ export function Ora2pgMigrationDashboard() {
             <TBody>
               {tables.map((t) => (
                 <TR key={t.table}>
+                  <TD className="text-neutral-500">{t.module}</TD>
                   <TD className="font-medium text-neutral-800">{t.table}</TD>
                   <TD className="text-neutral-500">
                     {t.target_schema}.{t.target_table}

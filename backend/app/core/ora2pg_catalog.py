@@ -6,7 +6,9 @@ Design 1B: ora2pg loads Oracle JDE -> MDP's own PostgreSQL, schema `mdp_staging`
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from pathlib import Path
 
 from sqlalchemy.engine.url import make_url
 
@@ -17,9 +19,10 @@ from app.core.config import settings
 class Ora2pgTable:
     """One migrate-able JDE table/view."""
 
-    table: str          # Oracle object name, e.g. V2_PRO_F0911
-    ts_col: str          # timestamp/watermark column used for incremental sync
-    label: str           # human label for the dashboard dropdown
+    table: str               # Oracle object name (view), e.g. V2_PRO_F0911
+    label: str               # human label for the dashboard dropdown
+    module: str              # JDE functional module (used to group the dropdown)
+    ts_col: str | None = None  # watermark column for incremental sync (None = full-load)
 
     @property
     def target_table(self) -> str:
@@ -27,13 +30,27 @@ class Ora2pgTable:
         return self.table.lower()
 
 
-# Config-driven list of supported tables (F0911:upmj, F0411:rpupmj, F4311:pdupmj).
-# Extend here without touching execution logic.
-MIGRATABLE_TABLES: list[Ora2pgTable] = [
-    Ora2pgTable(table="V2_PRO_F0911", ts_col="upmj", label="F0911 — Account Ledger"),
-    Ora2pgTable(table="V2_PRO_F0411", ts_col="rpupmj", label="F0411 — Accounts Payable Ledger"),
-    Ora2pgTable(table="V2_PRO_F4311", ts_col="pdupmj", label="F4311 — Purchase Order Detail"),
-]
+# Single source of truth: the finalized 40-table JDE catalog (Option A — Oracle views
+# V2_PRO_*). The JSON lives in the repo next to this module so the list can be regenerated
+# without touching execution logic. ts_col is only known for F0911/F0411/F4311 (the rest
+# full-load). `build_ora2pg_conf` does NOT use ts_col, so adding tables changes nothing there.
+_CATALOG_PATH = Path(__file__).with_name("jde_migrate_tables.json")
+
+
+def _load_catalog() -> list[Ora2pgTable]:
+    data = json.loads(_CATALOG_PATH.read_text(encoding="utf-8"))
+    return [
+        Ora2pgTable(
+            table=row["source_view"],
+            label=f'{row["table_id"]} — {row["name"]}',
+            module=row["module"],
+            ts_col=row.get("ts_col"),
+        )
+        for row in data["tables"]
+    ]
+
+
+MIGRATABLE_TABLES: list[Ora2pgTable] = _load_catalog()
 
 _BY_NAME = {t.table.upper(): t for t in MIGRATABLE_TABLES}
 

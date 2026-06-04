@@ -706,8 +706,9 @@ export type Ora2pgInfo = {
 };
 export type Ora2pgTable = {
   table: string;
-  ts_col: string;
+  ts_col: string | null;
   label: string;
+  module: string;
   target_table: string;
   target_schema: string;
   current_rows: number | null;
@@ -718,6 +719,7 @@ export type Ora2pgTable = {
 };
 export type Ora2pgStatusItem = {
   table: string;
+  module: string;
   target: string;
   current_rows: number | null;
   cursor: string | null;
