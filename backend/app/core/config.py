@@ -33,6 +33,36 @@ class Settings(BaseSettings):
     # Target schema in MDP's own postgres (design 1B: no separate DW, no FDW)
     ora2pg_target_schema: str = "mdp_staging"
 
+    # --- MQTT consumer (UNS broker -> Type A inbound). Default OFF; only enabled on .63. ---
+    mqtt_enabled: bool = False
+    mqtt_broker_host: str = ""
+    mqtt_broker_port: int = 1883
+    mqtt_topics: str = "tipa/hcm/plant1/#"
+    mqtt_qos: int = 1
+    mqtt_client_id: str = "mdp_uns_consumer"
+    mqtt_username: str = ""
+    mqtt_password: str = ""
+    mqtt_tls: bool = False
+    mqtt_reconnect_seconds: int = 5
+    # Optional JSON map of full-topic -> model name; otherwise the last topic segment is used.
+    mqtt_model_map: str = ""
+
+    @property
+    def mqtt_topic_list(self) -> list[str]:
+        return [t.strip() for t in self.mqtt_topics.split(",") if t.strip()]
+
+    @property
+    def mqtt_model_map_dict(self) -> dict[str, str]:
+        if not self.mqtt_model_map.strip():
+            return {}
+        try:
+            import json
+
+            data = json.loads(self.mqtt_model_map)
+            return {str(k): str(v) for k, v in data.items()} if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
     @model_validator(mode="after")
     def validate_production_settings(self) -> "Settings":
         if self.app_env != "production":

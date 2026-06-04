@@ -5,13 +5,15 @@ import Link from "next/link";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Card, CardBody } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
-import { Boxes, Plug, Repeat, Cable, Database, AlertTriangle } from "lucide-react";
+import { Boxes, Plug, Repeat, Cable, Database, AlertTriangle, Radio } from "lucide-react";
 import {
   listApiKeys,
   listConnections,
   listDataModels,
   listTables,
   listTransactions,
+  mqttStatus,
+  type MqttStatus,
 } from "@/lib/api";
 
 type Stats = {
@@ -57,6 +59,45 @@ function Stat({
   );
 }
 
+function MqttStatusCard() {
+  const [m, setM] = useState<MqttStatus | null>(null);
+  useEffect(() => {
+    const load = () => mqttStatus().then(setM).catch(() => {});
+    load();
+    const id = setInterval(load, 5000);
+    return () => clearInterval(id);
+  }, []);
+  if (!m) return null;
+  const tone = !m.configured_enabled ? "neutral" : m.connected ? "success" : "warning";
+  const label = !m.configured_enabled ? "disabled" : m.connected ? "connected" : "connecting…";
+  return (
+    <Card className="mb-4">
+      <CardBody>
+        <div className="flex flex-wrap items-center gap-3">
+          <Radio size={18} className="text-brand" />
+          <span className="text-sm font-semibold text-neutral-800">MQTT Consumer (UNS)</span>
+          <Badge tone={tone}>{label}</Badge>
+          {m.configured_broker && <span className="font-mono text-xs text-neutral-500">{m.configured_broker}</span>}
+          <span className="text-xs text-neutral-500">
+            topics: {(m.configured_topics || []).join(", ") || "—"}
+          </span>
+          <Link href="/transactions" className="ml-auto text-xs text-neutral-500 hover:text-brand">
+            received {m.messages_received} · ingested {m.messages_ingested} · skipped {m.messages_skipped} →
+          </Link>
+        </div>
+        {m.configured_enabled && !m.connected && m.last_error && (
+          <p className="mt-1 font-mono text-xs text-warning">last error: {m.last_error}</p>
+        )}
+        {!m.configured_enabled && (
+          <p className="mt-1 text-xs text-neutral-400">
+            Set MQTT_ENABLED=true + MQTT_BROKER_HOST to subscribe (enabled on .63).
+          </p>
+        )}
+      </CardBody>
+    </Card>
+  );
+}
+
 export default function DashboardPage() {
   const [s, setS] = useState<Stats | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -97,6 +138,7 @@ export default function DashboardPage() {
   return (
     <>
       <PageHeader title="Dashboard" subtitle="Avenue MDP — Manufacturing Data Platform." />
+      <MqttStatusCard />
       {err && <p className="mb-4 rounded-md bg-danger/10 px-3 py-2 text-sm text-danger">{err}</p>}
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
         <Stat

@@ -56,6 +56,17 @@ services:
       ORACLE_USER: ${ORACLE_USER:-}
       ORACLE_PWD: ${ORACLE_PWD:-}
       ORACLE_SCHEMA: ${ORACLE_SCHEMA:-SYSTEM}
+      # MQTT consumer (UNS broker -> Type A inbound). Default OFF; set MQTT_ENABLED=true +
+      # MQTT_BROKER_HOST on .63 to subscribe (e.g. tipa/hcm/plant1/#).
+      MQTT_ENABLED: ${MQTT_ENABLED:-false}
+      MQTT_BROKER_HOST: ${MQTT_BROKER_HOST:-}
+      MQTT_BROKER_PORT: ${MQTT_BROKER_PORT:-1883}
+      MQTT_TOPICS: ${MQTT_TOPICS:-tipa/hcm/plant1/#}
+      MQTT_QOS: ${MQTT_QOS:-1}
+      MQTT_CLIENT_ID: ${MQTT_CLIENT_ID:-mdp_uns_consumer}
+      MQTT_USERNAME: ${MQTT_USERNAME:-}
+      MQTT_PASSWORD: ${MQTT_PASSWORD:-}
+      MQTT_TLS: ${MQTT_TLS:-false}
     volumes:
       # exec ora2pg in its container, and share the generated ora2pg.conf
       - /var/run/docker.sock:/var/run/docker.sock

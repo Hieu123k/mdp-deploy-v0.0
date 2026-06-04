@@ -836,6 +836,24 @@ export const updateReferenceOption = (
   });
 export const deleteReferenceOption = (listKey: string, id: string) =>
   req<void>(`/reference/${encodeURIComponent(listKey)}/${id}`, { method: "DELETE" });
+
+// ----- MQTT consumer status (UNS broker -> Type A inbound) -----
+export type MqttStatus = {
+  enabled: boolean;
+  connected: boolean;
+  broker: string | null;
+  topics: string[];
+  messages_received: number;
+  messages_ingested: number;
+  messages_skipped: number;
+  last_message_at: string | null;
+  last_topic: string | null;
+  last_error: string | null;
+  configured_enabled: boolean;
+  configured_broker: string | null;
+  configured_topics: string[];
+};
+export const mqttStatus = () => req<MqttStatus>("/mqtt/status");
 export const ora2pgDiscoverKeys = () =>
   req<{ available: boolean; message: string | null; persisted: number; results: unknown[] }>(
     "/ora2pg/discover-keys",

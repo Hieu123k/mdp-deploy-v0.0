@@ -45,6 +45,16 @@ services:
       ORACLE_USER: ${ORACLE_USER:-demo}
       ORACLE_PWD: ${ORACLE_PWD:-demo}
       ORACLE_SCHEMA: ${ORACLE_SCHEMA:-SYSTEM}
+      # MQTT consumer (UNS broker -> Type A inbound). Default OFF; enable on .63 via env.
+      MQTT_ENABLED: ${MQTT_ENABLED:-false}
+      MQTT_BROKER_HOST: ${MQTT_BROKER_HOST:-}
+      MQTT_BROKER_PORT: ${MQTT_BROKER_PORT:-1883}
+      MQTT_TOPICS: ${MQTT_TOPICS:-tipa/hcm/plant1/#}
+      MQTT_QOS: ${MQTT_QOS:-1}
+      MQTT_CLIENT_ID: ${MQTT_CLIENT_ID:-mdp_uns_consumer}
+      MQTT_USERNAME: ${MQTT_USERNAME:-}
+      MQTT_PASSWORD: ${MQTT_PASSWORD:-}
+      MQTT_TLS: ${MQTT_TLS:-false}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ora2pg_config:/opt/ora2pg
