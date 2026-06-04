@@ -20,9 +20,11 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
+from sqlalchemy import text
+
 from app.core.config import settings
 from app.core.ora2pg_catalog import Ora2pgTable, build_ora2pg_conf, redact_conf
-from app.db.session import SessionLocal
+from app.db.session import SessionLocal, engine
 from app.models.migration import MigrationRun
 
 # run_id -> live progress snapshot. In-memory; the DB row is the durable fallback.
@@ -78,26 +80,36 @@ def _exec_collect(client_api: Any, container_id: str, cmd: list[str]) -> tuple[i
     return (code if code is not None else 1, text)
 
 
-def _apply_ddl(schema: str, ddl_sql: str) -> None:
+def _apply_ddl(schema: str, ddl_sql: str, target_table: str | None = None) -> None:
     """Create the target table in MDP's own postgres from ora2pg-generated DDL.
 
-    The backend already owns a connection to the target postgres, so it applies the
-    schema directly (design 1B). psql meta lines (\\...) are stripped, like migrate.sh.
+    Applies the DDL on a DEDICATED engine connection in AUTOCOMMIT mode (NOT the
+    Session's in-transaction connection), so CREATE SCHEMA / CREATE TABLE actually
+    persist instead of being rolled back when the Session closes (design 1B). psql
+    meta lines (\\...) are stripped, like migrate.sh.
+
+    If ``target_table`` is given, verifies with ``to_regclass`` that the table really
+    exists afterwards and raises a clear error otherwise — so a downstream COPY never
+    fails with a confusing ``relation ... does not exist``.
     """
     cleaned = "\n".join(l for l in ddl_sql.splitlines() if not l.lstrip().startswith("\\"))
     if not cleaned.strip():
         return
-    with SessionLocal() as db:
-        raw = db.connection().connection  # DBAPI connection
-        prev_autocommit = raw.autocommit
-        raw.autocommit = True
-        try:
-            with raw.cursor() as cur:
-                cur.execute(f'CREATE SCHEMA IF NOT EXISTS "{schema}";')
-                cur.execute(f'SET search_path TO "{schema}";')
-                cur.execute(cleaned)
-        finally:
-            raw.autocommit = prev_autocommit
+    with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+        raw = conn.connection  # DBAPI connection in REAL autocommit (no surrounding tx)
+        with raw.cursor() as cur:
+            cur.execute(f'CREATE SCHEMA IF NOT EXISTS "{schema}";')
+            cur.execute(f'SET search_path TO "{schema}";')
+            cur.execute(cleaned)  # psycopg3 runs the multi-statement auto_schema.sql
+    if target_table is not None:
+        with engine.connect() as conn:
+            reg = conn.execute(
+                text("SELECT to_regclass(:q)"), {"q": f'"{schema}"."{target_table}"'}
+            ).scalar()
+        if reg is None:
+            raise RuntimeError(
+                f"DDL applied but target table {schema}.{target_table} is missing"
+            )
 
 
 def _count_target(target_table: str) -> int | None:
@@ -192,7 +204,7 @@ def _worker(run_id: str, table: Ora2pgTable, test_rows: int) -> None:
         if os.path.exists(ddl_path):
             with open(ddl_path, encoding="utf-8") as fh:
                 ddl_sql = fh.read()
-        _apply_ddl(settings.ora2pg_target_schema, ddl_sql)
+        _apply_ddl(settings.ora2pg_target_schema, ddl_sql, target_table=table.target_table)
         _set(run_id, message="Target table ensured in mdp_staging")
     except Exception as exc:
         fail(f"Failed to apply target DDL: {exc}")
