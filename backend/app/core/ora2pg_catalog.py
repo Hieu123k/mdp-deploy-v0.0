@@ -81,6 +81,7 @@ def build_ora2pg_conf(
     test_rows: int = 0,
     truncate: bool = True,
     where_clause: str | None = None,
+    insert_on_conflict: bool = False,
 ) -> str:
     """Render an ora2pg.conf for one table (mirrors tools/ora2pg migrate.sh dynamic config).
 
@@ -88,10 +89,13 @@ def build_ora2pg_conf(
     text DOES contain runtime secrets and must only be written to the (gitignored)
     shared volume — never logged or committed. Use `redact_conf()` for logging.
 
-    Repair-delta mode (additive, defaults preserve the original full-load output):
-    ``truncate=False`` emits ``TRUNCATE_TABLE 0`` so ``-t COPY`` *appends* instead of
+    Repair-delta modes (additive, defaults preserve the original full-load output):
+    ``truncate=False`` emits ``TRUNCATE_TABLE 0`` so the export *appends* instead of
     wiping the table; ``where_clause`` injects an ora2pg ``WHERE`` directive (e.g.
-    ``V2_PRO_F0911[UPMJ >= 124001]``) to re-pull only a watermark range.
+    ``V2_PRO_F0911[UPMJ >= 124001]``) to re-pull only a watermark range;
+    ``insert_on_conflict=True`` emits ``INSERT_ON_CONFLICT 1`` so an ``-t INSERT`` pass
+    becomes ``INSERT … ON CONFLICT DO NOTHING`` — with a UNIQUE index on the target PK
+    this re-pulls the whole source but inserts only the rows that are missing (PK repair).
     """
     pg = _pg_target_parts()
     oracle_dsn = f"dbi:Oracle:host={settings.oracle_host};port={settings.oracle_port}"
@@ -131,6 +135,8 @@ def build_ora2pg_conf(
         "FILE_PER_TABLE   1",
         "NULLIF           ''",
     ]
+    if insert_on_conflict:
+        lines.append("INSERT_ON_CONFLICT 1")
     if where_clause:
         lines.append(f"WHERE            {where_clause}")
     elif test_rows and test_rows > 0:

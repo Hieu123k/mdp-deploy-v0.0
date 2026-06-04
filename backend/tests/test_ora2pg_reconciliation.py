@@ -147,10 +147,10 @@ def test_repair_endpoint_modes(client, auth_headers, monkeypatch):
     assert res.json()["mode"] == "watermark"
     assert calls["repair"]["cutoff"] == "124001"
 
-    # fallback full reload (no cutoff)
+    # fallback full reload (no cutoff, no pk) → mode "full"
     res2 = client.post("/ora2pg/tables/V2_PRO_F0911/repair", headers=auth_headers)
     assert res2.status_code == 202
-    assert res2.json()["mode"] == "full_reload"
+    assert res2.json()["mode"] == "full"
     assert calls.get("full") is True
 
     # bad cutoff → 400
@@ -179,3 +179,105 @@ def test_run_report_and_reconciliation_export(client, auth_headers, monkeypatch,
     assert len(ej.json()["tables"]) == 40
     ec = client.get("/ora2pg/reconciliation?format=csv", headers=auth_headers)
     assert ec.status_code == 200 and ec.headers["content-type"].startswith("text/csv")
+
+
+# ============================================================ Phase 2: PK repair
+def test_build_conf_insert_on_conflict_is_additive():
+    t = MIGRATABLE_TABLES[0]
+    assert "INSERT_ON_CONFLICT" not in build_ora2pg_conf(t)  # default unchanged
+    pk = build_ora2pg_conf(t, truncate=False, insert_on_conflict=True)
+    assert "INSERT_ON_CONFLICT 1" in pk
+    assert "TRUNCATE_TABLE   0" in pk
+
+
+def test_map_pk_to_view_exact_prefix_and_unmapped():
+    from app.services.ora2pg_runner import _map_pk_to_view
+
+    pk, un = _map_pk_to_view({"PK1": [(1, "DOC"), (2, "DCT")]}, {"DOC", "DCT", "KCO"})
+    assert pk == ["doc", "dct"] and un == []
+
+    pk2, _ = _map_pk_to_view({"PK1": [(1, "GLDOC"), (2, "GLDCT")]}, {"DOC", "DCT"})  # strip 2-char prefix
+    assert pk2 == ["doc", "dct"]
+
+    pk3, un3 = _map_pk_to_view({"PK1": [(1, "ZZZNOPE")]}, {"DOC"})
+    assert pk3 is None and "ZZZNOPE" in un3
+
+
+def test_ensure_unique_index_enables_on_conflict_skip():
+    """The crux of PK repair: a UNIQUE index + INSERT … ON CONFLICT DO NOTHING inserts only
+    the missing row and silently skips the duplicate (no error, no double)."""
+    engine = _require_pg()
+    from app.services.ora2pg_runner import _ensure_unique_index
+
+    schema, tbl = "mdp_staging", "t_uix_test"
+    with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as c:
+        c.exec_driver_sql(f'CREATE SCHEMA IF NOT EXISTS "{schema}"')
+        c.exec_driver_sql(f'DROP TABLE IF EXISTS "{schema}"."{tbl}"')
+        c.exec_driver_sql(f'CREATE TABLE "{schema}"."{tbl}" (doc int, dct text, descr text)')
+    try:
+        _ensure_unique_index(schema, tbl, ["doc", "dct"])
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as c:
+            c.exec_driver_sql(f"INSERT INTO \"{schema}\".\"{tbl}\" (doc, dct, descr) VALUES (1, 'a', 'orig')")
+            c.exec_driver_sql(
+                f"INSERT INTO \"{schema}\".\"{tbl}\" (doc, dct, descr) VALUES (1, 'a', 'dup') ON CONFLICT DO NOTHING"
+            )
+            c.exec_driver_sql(
+                f"INSERT INTO \"{schema}\".\"{tbl}\" (doc, dct, descr) VALUES (2, 'b', 'new') ON CONFLICT DO NOTHING"
+            )
+            rows = c.exec_driver_sql(f'SELECT count(*) FROM "{schema}"."{tbl}"').fetchone()[0]
+            kept = c.exec_driver_sql(
+                f"SELECT descr FROM \"{schema}\".\"{tbl}\" WHERE doc=1 AND dct='a'"
+            ).fetchone()[0]
+        assert rows == 2  # dup skipped, new inserted
+        assert kept == "orig"  # existing row untouched
+    finally:
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as c:
+            c.exec_driver_sql(f'DROP TABLE IF EXISTS "{schema}"."{tbl}"')
+
+
+def test_repair_mode_pk(client, auth_headers, monkeypatch, db_session):
+    import app.api.ora2pg_dashboard as mod
+
+    job = MigrationJob(
+        name="ora2pg_v2_pro_f4101", source_type="oracle", migration_tool="ora2pg",
+        target_schema="mdp_staging", target_table="v2_pro_f4101", load_mode="full_load",
+        primary_key_columns=["doc", "dct", "kco"],
+    )
+    db_session.add(job)
+    db_session.commit()
+
+    calls = {}
+    monkeypatch.setattr(mod, "start_repair", lambda run_id, table, **kw: calls.update(kw))
+    res = client.post("/ora2pg/tables/V2_PRO_F4101/repair?mode=pk", headers=auth_headers)
+    assert res.status_code == 202
+    assert res.json()["mode"] == "pk"
+    assert calls.get("mode") == "pk"
+    assert calls.get("pk_columns") == ["doc", "dct", "kco"]
+
+
+def test_repair_mode_pk_without_pk_is_400(client, auth_headers, monkeypatch):
+    import app.api.ora2pg_dashboard as mod
+
+    monkeypatch.setattr(mod, "start_repair", lambda *a, **k: None)
+    monkeypatch.setattr(mod, "start_run", lambda *a, **k: None)
+    res = client.post("/ora2pg/tables/V2_PRO_F4801/repair?mode=pk", headers=auth_headers)
+    assert res.status_code == 400
+
+
+def test_keys_endpoint_lists_40(client, auth_headers):
+    res = client.get("/ora2pg/keys", headers=auth_headers)
+    assert res.status_code == 200
+    body = res.json()
+    assert body["total"] == 40 and len(body["tables"]) == 40
+    assert all("repair_mode" in t for t in body["tables"])
+
+
+def test_discover_keys_graceful_without_oracle(client, auth_headers):
+    """No docker/Oracle in the test env → discovery returns available=False with all 40 tables
+    (pk null), never an error — the contract still holds for `.63`."""
+    res = client.post("/ora2pg/discover-keys", headers=auth_headers)
+    assert res.status_code == 200
+    body = res.json()
+    assert body["available"] is False
+    assert len(body["results"]) == 40
+    assert all(r["pk_columns"] is None for r in body["results"])

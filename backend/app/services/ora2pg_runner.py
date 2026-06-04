@@ -38,6 +38,35 @@ _PROGRESS_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Phase 2 PK discovery — a tiny Perl/DBI introspector run INSIDE the ora2pg container (which
+# already has DBD::Oracle). Credentials arrive via the exec environment (never written to a
+# file, never logged). Output is plain TSV lines: "IDX<tab>TABLE<tab>INDEX<tab>POS<tab>COL"
+# for unique-index columns of the base JDE tables, and "COL<tab>VIEW<tab>COL" for the V2_PRO_
+# view columns. No JSON module dependency (only DBI, which ora2pg guarantees).
+_DISCOVER_PERL = r"""
+use strict; use warnings; use DBI;
+my $dbh = DBI->connect($ENV{ORA_DSN}, $ENV{ORA_USER}, $ENV{ORA_PWD},
+                       { RaiseError => 1, AutoCommit => 1, PrintError => 0 });
+my $tin = join(",", map { "'".$_."'" } split /,/, ($ENV{ORA_TABLES} // ""));
+my $vin = join(",", map { "'".$_."'" } split /,/, ($ENV{ORA_VIEWS}  // ""));
+if ($tin ne "") {
+  my $s = $dbh->prepare(qq{
+    SELECT i.table_name, i.index_name, c.column_position, c.column_name
+    FROM all_indexes i JOIN all_ind_columns c
+      ON c.index_name = i.index_name AND c.index_owner = i.owner
+    WHERE i.uniqueness = 'UNIQUE' AND i.table_name IN ($tin)
+    ORDER BY i.table_name, i.index_name, c.column_position });
+  $s->execute();
+  while (my @r = $s->fetchrow_array()) { print "IDX\t$r[0]\t$r[1]\t$r[2]\t$r[3]\n"; }
+}
+if ($vin ne "") {
+  my $v = $dbh->prepare(qq{ SELECT table_name, column_name FROM all_tab_columns WHERE table_name IN ($vin) });
+  $v->execute();
+  while (my @r = $v->fetchrow_array()) { print "COL\t$r[0]\t$r[1]\n"; }
+}
+$dbh->disconnect();
+"""
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -180,13 +209,29 @@ def _write_conf(conf: str) -> None:
         fh.write(conf)
 
 
-def _copy_stream(api: Any, container_id: str, run_id: str, started: float, log_tail: list[str]) -> tuple[int | None, str | None]:
-    """Run `ora2pg -t COPY`, stream stdout/stderr and parse progress into the live snapshot.
-    Returns (exit_code, error). `error` is set only when the stream itself raised."""
+def _ensure_unique_index(schema: str, target: str, pk_columns: list[str]) -> None:
+    """Create a UNIQUE index on the target PK columns (idempotent). Required for PK-repair:
+    `INSERT … ON CONFLICT DO NOTHING` only skips existing rows when a unique constraint/index
+    backs the conflict. Column names are catalog/discovery values (not user input)."""
+    if not pk_columns:
+        return
+    cols = ", ".join(f'"{c.lower()}"' for c in pk_columns)
+    idx = f"ux_{target}_pk"[:63]
+    with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+        raw = conn.connection
+        with raw.cursor() as cur:
+            cur.execute(f'CREATE UNIQUE INDEX IF NOT EXISTS "{idx}" ON "{schema}"."{target}" ({cols})')
+
+
+def _copy_stream(
+    api: Any, container_id: str, run_id: str, started: float, log_tail: list[str], *, action: str = "COPY"
+) -> tuple[int | None, str | None]:
+    """Run `ora2pg -t <action>` (COPY or INSERT), stream stdout/stderr and parse progress into
+    the live snapshot. Returns (exit_code, error). `error` is set only when the stream raised."""
     try:
         exec_id = api.exec_create(
             container_id,
-            cmd=["ora2pg", "-c", "/config/ora2pg.conf", "-t", "COPY"],
+            cmd=["ora2pg", "-c", "/config/ora2pg.conf", "-t", action],
             stdout=True, stderr=True,
         )["Id"]
         stream = api.exec_start(exec_id, stream=True)
@@ -226,10 +271,10 @@ def _copy_stream(api: Any, container_id: str, run_id: str, started: float, log_t
                         _persist(run_id, rows_loaded=done, source_row_count=total)
         return api.exec_inspect(exec_id).get("ExitCode"), None
     except Exception as exc:
-        return None, f"ora2pg COPY stream error: {exc}"
+        return None, f"ora2pg {action} stream error: {exc}"
 
 
-def _worker(run_id: str, table: Ora2pgTable, test_rows: int) -> None:
+def _worker(run_id: str, table: Ora2pgTable, test_rows: int, pk_columns: list[str] | None = None) -> None:
     started = time.monotonic()
     started_at = datetime.now(timezone.utc)
     _set(
@@ -311,6 +356,12 @@ def _worker(run_id: str, table: Ora2pgTable, test_rows: int) -> None:
         _apply_ddl(settings.ora2pg_target_schema, ddl_sql, target_table=table.target_table)
         # Per-row audit columns — added AFTER the DROP/CREATE DDL, BEFORE COPY (see _ensure_audit_cols).
         _ensure_audit_cols(settings.ora2pg_target_schema, table.target_table, run_id)
+        # Phase 2: a UNIQUE index on the PK enables later PK-repair (ON CONFLICT). Best-effort.
+        if pk_columns:
+            try:
+                _ensure_unique_index(settings.ora2pg_target_schema, table.target_table, pk_columns)
+            except Exception as exc:  # don't fail a load just because the PK index couldn't be made
+                log_tail.append(f"warning: could not create unique PK index: {exc}")
         _set(run_id, message="Target table ensured in mdp_staging (+ _migrated_at / _migrate_run_id)")
     except Exception as exc:
         fail(f"Failed to apply target DDL: {exc}")
@@ -441,19 +492,209 @@ def _repair_worker(run_id: str, table: Ora2pgTable, watermark_col: str, cutoff: 
     _reconcile(run_id, source_rows=snap.get("rows_total"))
 
 
-def start_run(run_id: str, table: Ora2pgTable, *, test_rows: int = 0) -> None:
+def _repair_pk_worker(run_id: str, table: Ora2pgTable, pk_columns: list[str]) -> None:
+    """PK-repair (Phase 2): re-pull the WHOLE source with `-t INSERT` + `INSERT_ON_CONFLICT
+    DO NOTHING` against a UNIQUE index on the PK, so only the rows missing from the target are
+    inserted — precise, no duplicates, no reload, existing rows untouched. Patched rows carry
+    `_migrate_run_id` = this repair run."""
+    started = time.monotonic()
+    started_at = datetime.now(timezone.utc)
+    _set(
+        run_id, run_id=run_id, table=table.table, target_table=table.target_table,
+        status="running", phase="starting", rows_done=0, rows_total=None, pct=0.0,
+        rows_per_sec=0.0, elapsed_sec=0.0, eta_sec=None,
+        message=f"Starting PK repair on ({', '.join(pk_columns)})…", started_at=started_at.isoformat(),
+    )
+    _persist(run_id, status="running", started_at=started_at, run_scope=f"ora2pg-repair-pk:{table.table}")
+    log_tail: list[str] = []
+
+    def fail(msg: str) -> None:
+        elapsed = time.monotonic() - started
+        _set(run_id, status="failed", phase="failed", message=msg[-500:], elapsed_sec=elapsed)
+        _persist(
+            run_id, status="failed", finished_at=datetime.now(timezone.utc),
+            duration_seconds=int(elapsed), error_message=msg[-4000:],
+            log_text="\n".join(log_tail)[-8000:] or None,
+        )
+
+    try:
+        conf = build_ora2pg_conf(table, truncate=False, insert_on_conflict=True)
+        _write_conf(conf)
+        log_tail.append("Generated /config/ora2pg.conf (PK repair):\n" + redact_conf(conf))
+        _set(run_id, phase="config", message="Generated PK-repair ora2pg.conf (INSERT ON CONFLICT)")
+    except Exception as exc:
+        fail(f"Failed to generate PK-repair ora2pg.conf: {exc}")
+        return
+
+    try:
+        api, container = _open_ora2pg()
+    except Exception as exc:
+        fail(f"Cannot reach ora2pg container '{settings.ora2pg_container}': {exc}")
+        return
+
+    # Audit columns + the UNIQUE PK index that makes ON CONFLICT skip existing rows.
+    try:
+        _ensure_audit_cols(settings.ora2pg_target_schema, table.target_table, run_id)
+        _ensure_unique_index(settings.ora2pg_target_schema, table.target_table, pk_columns)
+    except Exception as exc:
+        fail(f"Failed to prepare target for PK repair: {exc}")
+        return
+
+    _set(run_id, phase="copy", message="Re-pulling source (INSERT … ON CONFLICT DO NOTHING)…")
+    exit_code, err = _copy_stream(api, container.id, run_id, started, log_tail, action="INSERT")
+    if err:
+        fail(err)
+        return
+
+    elapsed = time.monotonic() - started
+    if exit_code not in (0, None):
+        fail(f"ora2pg PK-repair INSERT failed (exit {exit_code}).\n" + "\n".join(log_tail[-20:]))
+        return
+
+    target_count = _count_target(table.target_table)
+    snap = get_progress(run_id) or {}
+    _set(
+        run_id, status="success", phase="done",
+        rows_done=target_count if target_count is not None else snap.get("rows_done", 0),
+        pct=100.0, eta_sec=0, elapsed_sec=round(elapsed, 1),
+        message=f"PK repair done — {target_count} rows in mdp_staging.{table.target_table}",
+    )
+    _persist(
+        run_id, status="success", finished_at=datetime.now(timezone.utc),
+        duration_seconds=int(elapsed), rows_loaded=target_count, target_row_count=target_count,
+        log_text="\n".join(log_tail)[-8000:] or None,
+    )
+    _reconcile(run_id, source_rows=snap.get("rows_total"))
+
+
+def start_run(
+    run_id: str, table: Ora2pgTable, *, test_rows: int = 0, pk_columns: list[str] | None = None
+) -> None:
     """Launch the ora2pg worker in a daemon thread (non-blocking)."""
     _set(run_id, run_id=run_id, table=table.table, status="pending", phase="queued",
          rows_done=0, rows_total=None, pct=0.0, message="Queued")
-    thread = threading.Thread(target=_worker, args=(run_id, table, test_rows), daemon=True)
+    thread = threading.Thread(target=_worker, args=(run_id, table, test_rows, pk_columns), daemon=True)
     thread.start()
 
 
-def start_repair(run_id: str, table: Ora2pgTable, *, watermark_col: str, cutoff: str) -> None:
-    """Launch the repair-delta worker in a daemon thread (non-blocking)."""
+def start_repair(
+    run_id: str,
+    table: Ora2pgTable,
+    *,
+    mode: str = "watermark",
+    watermark_col: str | None = None,
+    cutoff: str | None = None,
+    pk_columns: list[str] | None = None,
+) -> None:
+    """Launch a repair worker. ``mode='pk'`` → PK repair (ON CONFLICT); otherwise the v0.0
+    watermark-range repair (kept as fallback)."""
     _set(run_id, run_id=run_id, table=table.table, status="pending", phase="queued",
          rows_done=0, rows_total=None, pct=0.0, message="Queued (repair)")
-    thread = threading.Thread(
-        target=_repair_worker, args=(run_id, table, watermark_col, cutoff), daemon=True
-    )
+    if mode == "pk" and pk_columns:
+        thread = threading.Thread(
+            target=_repair_pk_worker, args=(run_id, table, pk_columns), daemon=True
+        )
+    else:
+        thread = threading.Thread(
+            target=_repair_worker, args=(run_id, table, watermark_col, cutoff), daemon=True
+        )
     thread.start()
+
+
+def _map_pk_to_view(index_cols: dict[str, list[tuple[int, str]]], view_cols: set[str]) -> tuple[list[str] | None, list[str]]:
+    """Given a base table's unique indexes ({index_name: [(pos, COL)]}) and the V2_PRO_ view's
+    columns, return (pk_columns_lowercased, unmapped). A column maps when the view exposes it
+    by the same name, or by the name minus the 2-char JDE data-item prefix (e.g. GLDOC→DOC).
+    Picks the fully-mappable unique index with the most columns; null if none maps cleanly."""
+    best: list[str] | None = None
+    last_unmapped: list[str] = []
+    for cols in index_cols.values():
+        ordered = [c for _, c in sorted(cols)]
+        mapped: list[str] = []
+        unmapped: list[str] = []
+        for c in ordered:
+            cu = c.upper()
+            if cu in view_cols:
+                mapped.append(cu.lower())
+            elif len(cu) > 2 and cu[2:] in view_cols:
+                mapped.append(cu[2:].lower())
+            else:
+                unmapped.append(c)
+        if mapped and not unmapped:
+            if best is None or len(mapped) > len(best):
+                best = mapped
+        else:
+            last_unmapped = unmapped
+    return best, ([] if best else last_unmapped)
+
+
+def discover_oracle_keys(tables: list[Ora2pgTable]) -> dict[str, Any]:
+    """Discover each table's PK from its Oracle UNIQUE index and map to the V2_PRO_ view columns.
+    Runs the introspection inside the ora2pg container (needs Oracle → only real on `.63`).
+    Returns {available, message, results:[{table_id, source_view, pk_columns, unmapped, error}]}.
+    Never raises; on the VPS (no Oracle) returns available=False with all pk_columns=None."""
+    base_to_view = {t.table.upper().replace("V2_PRO_", "", 1): t.table.upper() for t in tables}
+    results = [
+        {"table_id": b, "source_view": v, "pk_columns": None, "unmapped": [], "error": None}
+        for b, v in base_to_view.items()
+    ]
+    by_id = {r["table_id"]: r for r in results}
+
+    try:
+        api, container = _open_ora2pg()
+    except Exception as exc:
+        for r in results:
+            r["error"] = "ora2pg container unavailable"
+        return {"available": False, "message": str(exc), "results": results}
+
+    dsn = f"dbi:Oracle:host={settings.oracle_host};port={settings.oracle_port}"
+    if settings.oracle_service_name:
+        dsn += f";service_name={settings.oracle_service_name}"
+    elif settings.oracle_sid:
+        dsn += f";sid={settings.oracle_sid}"
+
+    try:
+        with open(os.path.join(settings.ora2pg_shared_dir, "discover_keys.pl"), "w", encoding="utf-8") as fh:
+            fh.write(_DISCOVER_PERL)
+        exec_id = api.exec_create(
+            container.id,
+            cmd=["perl", "/config/discover_keys.pl"],
+            environment={
+                "ORA_DSN": dsn,
+                "ORA_USER": settings.oracle_user or "",
+                "ORA_PWD": settings.oracle_pwd or "",
+                "ORA_TABLES": ",".join(base_to_view.keys()),
+                "ORA_VIEWS": ",".join(base_to_view.values()),
+            },
+            stdout=True, stderr=True,
+        )["Id"]
+        out = api.exec_start(exec_id)
+        text_out = out.decode("utf-8", "replace") if isinstance(out, (bytes, bytearray)) else str(out)
+        code = api.exec_inspect(exec_id).get("ExitCode")
+    except Exception as exc:
+        for r in results:
+            r["error"] = "introspection exec failed"
+        return {"available": False, "message": str(exc), "results": results}
+
+    if "IDX\t" not in text_out and "COL\t" not in text_out:
+        for r in results:
+            r["error"] = "oracle unreachable / no rows"
+        return {"available": False, "message": text_out.strip()[-300:] or f"exit {code}", "results": results}
+
+    idx: dict[str, dict[str, list[tuple[int, str]]]] = {}
+    viewcols: dict[str, set[str]] = {}
+    for line in text_out.splitlines():
+        p = line.split("\t")
+        if p[0] == "IDX" and len(p) == 5:
+            idx.setdefault(p[1].upper(), {}).setdefault(p[2], []).append((int(p[3]), p[4]))
+        elif p[0] == "COL" and len(p) == 3:
+            viewcols.setdefault(p[1].upper(), set()).add(p[2].upper())
+
+    for b, v in base_to_view.items():
+        r = by_id[b]
+        pk, unmapped = _map_pk_to_view(idx.get(b, {}), viewcols.get(v, set()))
+        r["pk_columns"] = pk
+        r["unmapped"] = unmapped
+        if pk is None and not idx.get(b):
+            r["error"] = "no unique index found"
+    return {"available": True, "message": "ok", "results": results}

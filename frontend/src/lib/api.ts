@@ -721,6 +721,7 @@ export type Ora2pgTable = {
   last_missed: number | null;
   last_validation_status: string | null;
   last_run_duration_sec: number | null;
+  pk_columns: string[] | null;
 };
 export type Ora2pgVerifyResult = {
   table: string;
@@ -781,9 +782,31 @@ export const ora2pgVerify = (table: string) =>
     `/ora2pg/tables/${encodeURIComponent(table)}/verify`,
     { method: "POST" },
   );
-export const ora2pgRepair = (table: string, cutoff?: string) =>
-  req<{ run_id: string; table: string; mode: string; status: string; stream_url?: string; message?: string }>(
-    `/ora2pg/tables/${encodeURIComponent(table)}/repair${cutoff ? `?cutoff=${encodeURIComponent(cutoff)}` : ""}`,
+export const ora2pgRepair = (
+  table: string,
+  opts: { mode?: "pk" | "watermark" | "full"; cutoff?: string } = {},
+) => {
+  const qs = new URLSearchParams();
+  if (opts.mode) qs.set("mode", opts.mode);
+  if (opts.cutoff) qs.set("cutoff", opts.cutoff);
+  const q = qs.toString();
+  return req<{ run_id: string; table: string; mode: string; status: string; stream_url?: string; message?: string }>(
+    `/ora2pg/tables/${encodeURIComponent(table)}/repair${q ? `?${q}` : ""}`,
+    { method: "POST" },
+  );
+};
+export type Ora2pgKeyItem = {
+  table: string;
+  module: string;
+  target_table: string;
+  pk_columns: string[] | null;
+  repair_mode: string;
+};
+export const ora2pgKeys = () =>
+  req<{ version: string; with_pk: number; total: number; tables: Ora2pgKeyItem[] }>("/ora2pg/keys");
+export const ora2pgDiscoverKeys = () =>
+  req<{ available: boolean; message: string | null; persisted: number; results: unknown[] }>(
+    "/ora2pg/discover-keys",
     { method: "POST" },
   );
 

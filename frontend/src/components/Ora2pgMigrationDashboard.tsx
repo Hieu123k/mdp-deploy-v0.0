@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CheckCircle2, Database, Download, Play, RefreshCw, Terminal } from "lucide-react";
 import { Badge, type BadgeTone } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
@@ -191,15 +191,21 @@ export function Ora2pgMigrationDashboard() {
 
   const onRepair = async (t: Ora2pgTable) => {
     setError(null);
-    let cutoff: string | undefined;
-    if (t.ts_col) {
+    let opts: { mode?: "pk" | "watermark" | "full"; cutoff?: string };
+    if (t.pk_columns && t.pk_columns.length > 0) {
+      // Phase 2 precise repair — re-pull source, INSERT ON CONFLICT DO NOTHING (no prompt).
+      opts = { mode: "pk" };
+    } else if (t.ts_col) {
       const entered = window.prompt(
-        `Repair-delta ${t.table}: re-pull rows where ${t.ts_col} >= cutoff (JDE Julian date, e.g. 124001). ` +
-          `Leave blank to full-reload.`,
+        `Repair ${t.table} by watermark ${t.ts_col} >= cutoff (JDE Julian date, e.g. 124001). ` +
+          `Leave blank = full reload.`,
         "",
       );
       if (entered === null) return; // cancelled
-      cutoff = entered.trim() || undefined;
+      opts = entered.trim() ? { mode: "watermark", cutoff: entered.trim() } : { mode: "full" };
+    } else {
+      if (!window.confirm(`No PK/watermark known for ${t.table} — full reload?`)) return;
+      opts = { mode: "full" };
     }
     setBusy(true);
     setProgress({
@@ -211,10 +217,10 @@ export function Ora2pgMigrationDashboard() {
       rows_per_sec: 0,
       elapsed_sec: 0,
       eta_sec: null,
-      message: `Submitting repair for ${t.table}…`,
+      message: `Submitting ${opts.mode} repair for ${t.table}…`,
     });
     try {
-      const res = await ora2pgRepair(t.table, cutoff);
+      const res = await ora2pgRepair(t.table, opts);
       setSelected(t.table);
       watchRun(res.run_id);
     } catch (e) {
@@ -254,6 +260,12 @@ export function Ora2pgMigrationDashboard() {
   }, [tables]);
 
   const pct = Math.min(100, Math.max(0, progress?.pct ?? 0));
+
+  // The table whose run is currently live — used to render an inline progress bar in its row.
+  const activeTable =
+    progress && (progress.status === "running" || progress.status === "pending")
+      ? progress.table || selected
+      : null;
 
   return (
     <Card className="mb-4 border-brand/30">
@@ -404,9 +416,17 @@ export function Ora2pgMigrationDashboard() {
             </THead>
             <TBody>
               {tables.map((t) => (
-                <TR key={t.table}>
+                <Fragment key={t.table}>
+                <TR>
                   <TD className="text-neutral-500">{t.module}</TD>
-                  <TD className="font-medium text-neutral-800">{t.table}</TD>
+                  <TD className="font-medium text-neutral-800">
+                    {t.table}
+                    {t.pk_columns && t.pk_columns.length > 0 && (
+                      <span className="ml-1.5" title={`PK: ${t.pk_columns.join(", ")}`}>
+                        <Badge tone="info">PK</Badge>
+                      </span>
+                    )}
+                  </TD>
                   <TD className="text-neutral-500">
                     {t.target_schema}.{t.target_table}
                   </TD>
@@ -452,9 +472,11 @@ export function Ora2pgMigrationDashboard() {
                         onClick={() => onRepair(t)}
                         disabled={busy}
                         title={
-                          t.ts_col
-                            ? `Repair-delta by watermark (${t.ts_col})`
-                            : "No watermark — repair falls back to full reload"
+                          t.pk_columns && t.pk_columns.length > 0
+                            ? `PK repair (INSERT ON CONFLICT) on ${t.pk_columns.join(", ")}`
+                            : t.ts_col
+                              ? `Repair-delta by watermark (${t.ts_col})`
+                              : "No PK/watermark — repair falls back to full reload"
                         }
                       >
                         <RefreshCw size={13} /> Repair
@@ -462,6 +484,31 @@ export function Ora2pgMigrationDashboard() {
                     </div>
                   </TD>
                 </TR>
+                {activeTable === t.table && progress && (
+                  <TR>
+                    <TD colSpan={10} className="bg-brand/5">
+                      <div className="flex items-center gap-3 px-1 py-1">
+                        <Badge tone={statusTone(progress.status)}>
+                          {progress.status}
+                          {progress.phase && progress.phase !== progress.status ? ` · ${progress.phase}` : ""}
+                        </Badge>
+                        <div className="h-2 flex-1 overflow-hidden rounded-full bg-neutral-200">
+                          <div
+                            className="h-full rounded-full bg-brand transition-all duration-500"
+                            style={{ width: `${Math.min(100, Math.max(0, progress.pct))}%` }}
+                          />
+                        </div>
+                        <span className="whitespace-nowrap font-mono text-xs text-neutral-600">
+                          {fmtInt(progress.rows_done)}/{fmtInt(progress.rows_total)} ·{" "}
+                          {Math.min(100, Math.max(0, progress.pct)).toFixed(1)}% ·{" "}
+                          {fmtInt(Math.round(progress.rows_per_sec))}/s · {fmtDur(progress.elapsed_sec)} · ETA{" "}
+                          {fmtDur(progress.eta_sec ?? undefined)}
+                        </span>
+                      </div>
+                    </TD>
+                  </TR>
+                )}
+                </Fragment>
               ))}
             </TBody>
           </Table>

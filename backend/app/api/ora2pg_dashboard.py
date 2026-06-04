@@ -30,7 +30,12 @@ from app.core.ora2pg_catalog import (
 from app.db.session import get_db
 from app.models.migration import MigrationJob, MigrationRun, MigrationValidation
 from app.models.user import User
-from app.services.ora2pg_runner import get_progress, start_repair, start_run
+from app.services.ora2pg_runner import (
+    discover_oracle_keys,
+    get_progress,
+    start_repair,
+    start_run,
+)
 
 DASHBOARD_VERSION = "v0.0"
 
@@ -180,6 +185,7 @@ def list_tables(db: Annotated[Session, Depends(get_db)]) -> dict[str, Any]:
             "last_run_id": str(last.id) if last else None,
             "last_run_status": last.status if last else None,
             "last_run_at": last.started_at.isoformat() if last and last.started_at else None,
+            "pk_columns": job.primary_key_columns if job else None,
             **_recon_fields(last),
         })
     return {"version": DASHBOARD_VERSION, "tables": items}
@@ -232,7 +238,10 @@ def start_migration(
     db.commit()
     db.refresh(run)
 
-    start_run(str(run.id), table, test_rows=test_rows)
+    # Phase 2: if the PK has been discovered for this table, a UNIQUE index is created during
+    # the load so later PK-repair (ON CONFLICT) works. Null pk → unchanged v0.0 behaviour.
+    pk_columns = job.primary_key_columns or None
+    start_run(str(run.id), table, test_rows=test_rows, pk_columns=pk_columns)
     return {"run_id": str(run.id), "table": table.table, "status": "pending",
             "stream_url": f"/ora2pg/runs/{run.id}/stream"}
 
@@ -292,18 +301,42 @@ def repair_table(
     table_name: str,
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
+    mode: str | None = None,
     cutoff: str | None = None,
 ) -> dict[str, Any]:
-    """Repair-delta: re-pull only the watermark range (`ts_col >= cutoff`) and append, without
-    reloading the whole table. Falls back to a full reload when the table has no watermark
-    (`ts_col` is null) or no cutoff is supplied. `cutoff` must be an integer (JDE Julian date)."""
+    """Repair only the missing rows, without reloading the whole table.
+
+    ``mode``:
+    - ``pk`` (Phase 2, precise) — re-pull the source with ``INSERT … ON CONFLICT DO NOTHING``
+      against the discovered PK; inserts exactly the missing rows, no duplicates. Needs the
+      table's ``primary_key_columns`` (run discover-keys on `.63` first).
+    - ``watermark`` (v0.0) — re-pull rows with ``ts_col >= cutoff`` (DELETE range then append).
+    - ``full`` — full reload.
+    When ``mode`` is omitted it auto-selects: pk → watermark → full, by what's available.
+    """
     table = get_table(table_name)
     if table is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown table")
     if cutoff is not None and not str(cutoff).lstrip("-").isdigit():
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="cutoff must be an integer")
+    if mode is not None and mode not in {"pk", "watermark", "full"}:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="mode must be pk|watermark|full")
 
     job = _get_or_create_job(db, table)
+    pk_columns = job.primary_key_columns or None
+
+    # Resolve the effective mode (explicit request must be satisfiable, else 400).
+    if mode == "pk" and not pk_columns:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail="No primary_key_columns for this table — run discover-keys (.63) or use mode=watermark")
+    if mode == "watermark" and not (table.ts_col and cutoff is not None):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail="watermark repair needs ts_col + integer cutoff")
+    if mode is None:
+        effective = "pk" if pk_columns else "watermark" if (table.ts_col and cutoff is not None) else "full"
+    else:
+        effective = mode
+
     existing = _latest_run(db, job.id)
     if existing and existing.status in {"pending", "running"}:
         live = get_progress(str(existing.id))
@@ -311,29 +344,29 @@ def repair_table(
             return {"run_id": str(existing.id), "table": table.table, "status": existing.status,
                     "message": "A run is already in progress"}
 
-    use_watermark = bool(table.ts_col) and cutoff is not None
+    run_type = {"pk": "ora2pg_repair_pk", "watermark": "ora2pg_repair", "full": "ora2pg_copy"}[effective]
     run = MigrationRun(
         migration_job_id=job.id,
-        run_type="ora2pg_repair" if use_watermark else "ora2pg_copy",
+        run_type=run_type,
         trigger_type="dashboard",
         status="pending",
         started_at=datetime.now(timezone.utc),
         run_scope=f"ora2pg-repair:{table.table}",
         triggered_by=current_user.id,
-        from_watermark=str(cutoff) if use_watermark else None,
+        from_watermark=str(cutoff) if effective == "watermark" else None,
     )
     db.add(run)
     db.commit()
     db.refresh(run)
 
-    if use_watermark:
-        start_repair(str(run.id), table, watermark_col=table.ts_col, cutoff=str(cutoff))
-        mode = "watermark"
+    if effective == "pk":
+        start_repair(str(run.id), table, mode="pk", pk_columns=pk_columns)
+    elif effective == "watermark":
+        start_repair(str(run.id), table, mode="watermark", watermark_col=table.ts_col, cutoff=str(cutoff))
     else:
-        start_run(str(run.id), table)  # fallback: full reload
-        mode = "full_reload"
+        start_run(str(run.id), table, pk_columns=pk_columns)  # full reload (keeps PK index if known)
 
-    return {"run_id": str(run.id), "table": table.table, "mode": mode, "status": "pending",
+    return {"run_id": str(run.id), "table": table.table, "mode": effective, "status": "pending",
             "stream_url": f"/ora2pg/runs/{run.id}/stream"}
 
 
@@ -501,3 +534,51 @@ def reconciliation_export(
         return _csv_response(rows, "reconciliation.csv")
     return {"version": DASHBOARD_VERSION, "schema": settings.ora2pg_target_schema,
             "generated_from": "migration_runs + migration_validations", "tables": rows}
+
+
+@router.get("/keys")
+def list_keys(db: Annotated[Session, Depends(get_db)]) -> dict[str, Any]:
+    """Current PK coverage per table (from MigrationJob.primary_key_columns). Drives which
+    tables can use precise PK-repair vs the watermark/full-reload fallback."""
+    items = []
+    have = 0
+    for t in MIGRATABLE_TABLES:
+        job = db.scalar(select(MigrationJob).where(MigrationJob.name == _job_name(t.target_table)))
+        pk = job.primary_key_columns if job else None
+        if pk:
+            have += 1
+        items.append({
+            "table": t.table, "module": t.module, "target_table": t.target_table,
+            "pk_columns": pk, "repair_mode": "pk" if pk else ("watermark" if t.ts_col else "full"),
+        })
+    return {"version": DASHBOARD_VERSION, "with_pk": have, "total": len(MIGRATABLE_TABLES), "tables": items}
+
+
+@router.post("/discover-keys")
+def discover_keys(
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> dict[str, Any]:
+    """Discover each table's PK from the Oracle unique index and persist it onto the table's
+    MigrationJob.primary_key_columns. Needs Oracle → real only on `.63`; on the VPS it returns
+    available=False (all pk null) without error, so the contract is still testable."""
+    discovery = discover_oracle_keys(MIGRATABLE_TABLES)
+    persisted = 0
+    if discovery.get("available"):
+        for r in discovery["results"]:
+            if not r.get("pk_columns"):
+                continue
+            table = get_table(r["source_view"])
+            if table is None:
+                continue
+            job = _get_or_create_job(db, table)
+            job.primary_key_columns = r["pk_columns"]
+            db.add(job)
+            persisted += 1
+        db.commit()
+    return {
+        "available": discovery.get("available", False),
+        "message": discovery.get("message"),
+        "persisted": persisted,
+        "results": discovery.get("results", []),
+    }
