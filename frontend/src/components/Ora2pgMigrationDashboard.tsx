@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Database, Play, RefreshCw, Terminal } from "lucide-react";
+import { CheckCircle2, Database, Download, Play, RefreshCw, Terminal } from "lucide-react";
 import { Badge, type BadgeTone } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card, CardBody, CardHeader } from "@/components/ui/Card";
@@ -11,11 +11,14 @@ import { Table, TBody, TD, TH, THead, TR } from "@/components/ui/Table";
 import {
   ApiError,
   ora2pgConfigPreview,
+  ora2pgDownloadReconciliation,
   ora2pgGetRun,
   ora2pgInfo,
   ora2pgListTables,
+  ora2pgRepair,
   ora2pgStart,
   ora2pgStreamRun,
+  ora2pgVerify,
   type Ora2pgInfo,
   type Ora2pgProgress,
   type Ora2pgTable,
@@ -49,6 +52,19 @@ function statusTone(status?: string): BadgeTone {
   }
 }
 
+function validationTone(status?: string | null): BadgeTone {
+  switch (status) {
+    case "MATCH":
+      return "success";
+    case "MISMATCH":
+      return "danger";
+    case "PENDING":
+      return "warning";
+    default:
+      return "neutral";
+  }
+}
+
 export function Ora2pgMigrationDashboard() {
   const [info, setInfo] = useState<Ora2pgInfo | null>(null);
   const [tables, setTables] = useState<Ora2pgTable[]>([]);
@@ -63,6 +79,8 @@ export function Ora2pgMigrationDashboard() {
   const abortRef = useRef<(() => void) | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  const [verifying, setVerifying] = useState<string | null>(null);
+
   const loadTables = useCallback(async () => {
     try {
       const r = await ora2pgListTables();
@@ -70,6 +88,30 @@ export function Ora2pgMigrationDashboard() {
       setSelected((cur) => cur || (r.tables[0]?.table ?? ""));
     } catch (e) {
       setError(e instanceof ApiError ? e.message : "Failed to load tables");
+    }
+  }, []);
+
+  const onVerify = useCallback(
+    async (table: string) => {
+      setVerifying(table);
+      setError(null);
+      try {
+        await ora2pgVerify(table); // recount target + write verdict
+        await loadTables(); // refresh Source/Missed/Verify columns
+      } catch (e) {
+        setError(e instanceof ApiError ? e.message : "Verify failed");
+      } finally {
+        setVerifying(null);
+      }
+    },
+    [loadTables],
+  );
+
+  const onDownloadLog = useCallback(async (format: "json" | "csv") => {
+    try {
+      await ora2pgDownloadReconciliation(format);
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Download failed");
     }
   }, []);
 
@@ -97,6 +139,31 @@ export function Ora2pgMigrationDashboard() {
     loadTables();
   }, [loadTables]);
 
+  const watchRun = (runId: string) => {
+    stopWatchers();
+    // Live SSE stream
+    abortRef.current = ora2pgStreamRun(
+      runId,
+      (p) => {
+        setProgress(p);
+        if (p.status === "success" || p.status === "failed") finishRun();
+      },
+      () => {
+        /* stream ended; poll fallback below confirms terminal state */
+      },
+    );
+    // Poll fallback (covers SSE drops / proxy buffering)
+    pollRef.current = setInterval(async () => {
+      try {
+        const p = await ora2pgGetRun(runId);
+        setProgress((cur) => (cur && cur.status === "running" && p.status === "running" ? cur : p));
+        if (p.status === "success" || p.status === "failed") finishRun();
+      } catch {
+        /* ignore */
+      }
+    }, 2500);
+  };
+
   const onStart = async () => {
     if (!selected) return;
     setError(null);
@@ -114,31 +181,44 @@ export function Ora2pgMigrationDashboard() {
     });
     try {
       const res = await ora2pgStart(selected, Number(testRows) || 0);
-      const runId = res.run_id;
-      stopWatchers();
-      // Live SSE stream
-      abortRef.current = ora2pgStreamRun(
-        runId,
-        (p) => {
-          setProgress(p);
-          if (p.status === "success" || p.status === "failed") finishRun();
-        },
-        () => {
-          /* stream ended; poll fallback below confirms terminal state */
-        },
-      );
-      // Poll fallback (covers SSE drops / proxy buffering)
-      pollRef.current = setInterval(async () => {
-        try {
-          const p = await ora2pgGetRun(runId);
-          setProgress((cur) => (cur && cur.status === "running" && p.status === "running" ? cur : p));
-          if (p.status === "success" || p.status === "failed") finishRun();
-        } catch {
-          /* ignore */
-        }
-      }, 2500);
+      watchRun(res.run_id);
     } catch (e) {
       setError(e instanceof ApiError ? e.message : "Failed to start migration");
+      setProgress(null);
+      setBusy(false);
+    }
+  };
+
+  const onRepair = async (t: Ora2pgTable) => {
+    setError(null);
+    let cutoff: string | undefined;
+    if (t.ts_col) {
+      const entered = window.prompt(
+        `Repair-delta ${t.table}: re-pull rows where ${t.ts_col} >= cutoff (JDE Julian date, e.g. 124001). ` +
+          `Leave blank to full-reload.`,
+        "",
+      );
+      if (entered === null) return; // cancelled
+      cutoff = entered.trim() || undefined;
+    }
+    setBusy(true);
+    setProgress({
+      run_id: "",
+      status: "pending",
+      rows_done: 0,
+      rows_total: null,
+      pct: 0,
+      rows_per_sec: 0,
+      elapsed_sec: 0,
+      eta_sec: null,
+      message: `Submitting repair for ${t.table}…`,
+    });
+    try {
+      const res = await ora2pgRepair(t.table, cutoff);
+      setSelected(t.table);
+      watchRun(res.run_id);
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Repair failed");
       setProgress(null);
       setBusy(false);
     }
@@ -294,7 +374,19 @@ export function Ora2pgMigrationDashboard() {
         )}
 
         <div>
-          <h4 className="mb-2 text-sm font-semibold text-neutral-700">Target table status (mdp_staging)</h4>
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <h4 className="text-sm font-semibold text-neutral-700">
+              Target table status &amp; reconciliation (mdp_staging)
+            </h4>
+            <div className="flex items-center gap-2">
+              <Button variant="ghost" size="sm" onClick={() => onDownloadLog("csv")}>
+                <Download size={14} /> Log .csv
+              </Button>
+              <Button variant="ghost" size="sm" onClick={() => onDownloadLog("json")}>
+                <Download size={14} /> Log .json
+              </Button>
+            </div>
+          </div>
           <Table>
             <THead>
               <TR>
@@ -302,8 +394,12 @@ export function Ora2pgMigrationDashboard() {
                 <TH>Table</TH>
                 <TH>Target</TH>
                 <TH>Current rows</TH>
-                <TH>Cursor</TH>
+                <TH>Source</TH>
+                <TH>Missed</TH>
+                <TH>Duration</TH>
+                <TH>Verify</TH>
                 <TH>Last run</TH>
+                <TH> </TH>
               </TR>
             </THead>
             <TBody>
@@ -315,13 +411,55 @@ export function Ora2pgMigrationDashboard() {
                     {t.target_schema}.{t.target_table}
                   </TD>
                   <TD>{fmtInt(t.current_rows)}</TD>
-                  <TD className="text-neutral-500">{t.cursor ?? "—"}</TD>
+                  <TD>{fmtInt(t.last_source_rows)}</TD>
+                  <TD
+                    className={
+                      t.last_missed && t.last_missed > 0 ? "font-semibold text-danger" : "text-neutral-500"
+                    }
+                  >
+                    {fmtInt(t.last_missed)}
+                  </TD>
+                  <TD className="text-neutral-500">{fmtDur(t.last_run_duration_sec)}</TD>
+                  <TD>
+                    {t.last_validation_status ? (
+                      <Badge tone={validationTone(t.last_validation_status)}>
+                        {t.last_validation_status}
+                      </Badge>
+                    ) : (
+                      <span className="text-neutral-400">—</span>
+                    )}
+                  </TD>
                   <TD>
                     {t.last_run_status ? (
                       <Badge tone={statusTone(t.last_run_status)}>{t.last_run_status}</Badge>
                     ) : (
                       <span className="text-neutral-400">never</span>
                     )}
+                  </TD>
+                  <TD>
+                    <div className="flex items-center gap-1.5">
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        onClick={() => onVerify(t.table)}
+                        disabled={verifying === t.table}
+                      >
+                        <CheckCircle2 size={13} /> {verifying === t.table ? "…" : "Verify"}
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => onRepair(t)}
+                        disabled={busy}
+                        title={
+                          t.ts_col
+                            ? `Repair-delta by watermark (${t.ts_col})`
+                            : "No watermark — repair falls back to full reload"
+                        }
+                      >
+                        <RefreshCw size={13} /> Repair
+                      </Button>
+                    </div>
                   </TD>
                 </TR>
               ))}

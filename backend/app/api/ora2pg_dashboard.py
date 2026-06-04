@@ -7,13 +7,15 @@ migration_jobs router. Nothing here modifies existing endpoints/behaviour.
 from __future__ import annotations
 
 import asyncio
+import csv
+import io
 import json
 import uuid
 from datetime import datetime, timezone
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
@@ -26,9 +28,9 @@ from app.core.ora2pg_catalog import (
     redact_conf,
 )
 from app.db.session import get_db
-from app.models.migration import MigrationJob, MigrationRun
+from app.models.migration import MigrationJob, MigrationRun, MigrationValidation
 from app.models.user import User
-from app.services.ora2pg_runner import get_progress, start_run
+from app.services.ora2pg_runner import get_progress, start_repair, start_run
 
 DASHBOARD_VERSION = "v0.0"
 
@@ -102,6 +104,22 @@ def _cursor_for(db: Session, target_table: str) -> str | None:
     return None
 
 
+def _recon_fields(last: "MigrationRun | None") -> dict[str, Any]:
+    """Reconciliation summary derived from a run (source vs target, missed, verdict, duration)."""
+    if last is None:
+        return {
+            "last_source_rows": None, "last_target_rows": None, "last_missed": None,
+            "last_validation_status": None, "last_run_duration_sec": None,
+        }
+    src, tgt = last.source_row_count, last.target_row_count
+    missed = (src - tgt) if (src is not None and tgt is not None) else None
+    return {
+        "last_source_rows": src, "last_target_rows": tgt, "last_missed": missed,
+        "last_validation_status": last.validation_status,
+        "last_run_duration_sec": last.duration_seconds,
+    }
+
+
 def _latest_run(db: Session, job_id: uuid.UUID) -> MigrationRun | None:
     return db.scalar(
         select(MigrationRun)
@@ -162,6 +180,7 @@ def list_tables(db: Annotated[Session, Depends(get_db)]) -> dict[str, Any]:
             "last_run_id": str(last.id) if last else None,
             "last_run_status": last.status if last else None,
             "last_run_at": last.started_at.isoformat() if last and last.started_at else None,
+            **_recon_fields(last),
         })
     return {"version": DASHBOARD_VERSION, "tables": items}
 
@@ -218,6 +237,106 @@ def start_migration(
             "stream_url": f"/ora2pg/runs/{run.id}/stream"}
 
 
+@router.post("/tables/{table_name}/verify")
+def verify_table(
+    table_name: str,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> dict[str, Any]:
+    """On-demand reconciliation: exact COUNT(*) of the target now, compared to the source
+    count recorded by the last run. (Live Oracle source count runs only where Oracle is
+    reachable — `.63`; on the VPS the source is the stored last-run count.)"""
+    table = get_table(table_name)
+    if table is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown table")
+    job = db.scalar(select(MigrationJob).where(MigrationJob.name == _job_name(table.target_table)))
+    last = _latest_run(db, job.id) if job else None
+
+    target_rows = _count_table(db, table.target_table)  # exact COUNT (SAVEPOINT-guarded)
+    source_rows = last.source_row_count if last else None
+    missed = (source_rows - target_rows) if (source_rows is not None and target_rows is not None) else None
+    if source_rows is None or target_rows is None:
+        verdict = "PENDING"
+    else:
+        verdict = "MATCH" if missed == 0 else "MISMATCH"
+
+    if last is not None:
+        last.target_row_count = target_rows
+        last.validation_status = verdict
+        db.add(last)
+        db.add(MigrationValidation(
+            migration_run_id=last.id,
+            check_name="verify_target_row_count",
+            source_value=str(source_rows) if source_rows is not None else None,
+            target_value=str(target_rows) if target_rows is not None else None,
+            status="pass" if verdict == "MATCH" else "fail" if verdict == "MISMATCH" else "warning",
+            message=f"On-demand verify: target={target_rows}, source={source_rows}, missed={missed}",
+        ))
+        db.commit()
+
+    return {
+        "table": table.table,
+        "target_table": table.target_table,
+        "source_rows": source_rows,
+        "target_rows": target_rows,
+        "missed": missed,
+        "validation_status": verdict,
+        "source_available": source_rows is not None,
+        "last_run_id": str(last.id) if last else None,
+        "message": "Source = last-run count; live Oracle count runs on .63.",
+    }
+
+
+@router.post("/tables/{table_name}/repair", status_code=status.HTTP_202_ACCEPTED)
+def repair_table(
+    table_name: str,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+    cutoff: str | None = None,
+) -> dict[str, Any]:
+    """Repair-delta: re-pull only the watermark range (`ts_col >= cutoff`) and append, without
+    reloading the whole table. Falls back to a full reload when the table has no watermark
+    (`ts_col` is null) or no cutoff is supplied. `cutoff` must be an integer (JDE Julian date)."""
+    table = get_table(table_name)
+    if table is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown table")
+    if cutoff is not None and not str(cutoff).lstrip("-").isdigit():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="cutoff must be an integer")
+
+    job = _get_or_create_job(db, table)
+    existing = _latest_run(db, job.id)
+    if existing and existing.status in {"pending", "running"}:
+        live = get_progress(str(existing.id))
+        if live and live.get("status") in {"pending", "running"}:
+            return {"run_id": str(existing.id), "table": table.table, "status": existing.status,
+                    "message": "A run is already in progress"}
+
+    use_watermark = bool(table.ts_col) and cutoff is not None
+    run = MigrationRun(
+        migration_job_id=job.id,
+        run_type="ora2pg_repair" if use_watermark else "ora2pg_copy",
+        trigger_type="dashboard",
+        status="pending",
+        started_at=datetime.now(timezone.utc),
+        run_scope=f"ora2pg-repair:{table.table}",
+        triggered_by=current_user.id,
+        from_watermark=str(cutoff) if use_watermark else None,
+    )
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+
+    if use_watermark:
+        start_repair(str(run.id), table, watermark_col=table.ts_col, cutoff=str(cutoff))
+        mode = "watermark"
+    else:
+        start_run(str(run.id), table)  # fallback: full reload
+        mode = "full_reload"
+
+    return {"run_id": str(run.id), "table": table.table, "mode": mode, "status": "pending",
+            "stream_url": f"/ora2pg/runs/{run.id}/stream"}
+
+
 @router.get("/runs/{run_id}")
 def get_run(run_id: uuid.UUID, db: Annotated[Session, Depends(get_db)]) -> dict[str, Any]:
     run = db.get(MigrationRun, run_id)
@@ -268,6 +387,117 @@ def db_status(db: Annotated[Session, Depends(get_db)]) -> dict[str, Any]:
             "last_run_status": last.status if last else None,
             "last_run_rows": (last.rows_loaded if last else None),
             "last_run_at": last.started_at.isoformat() if last and last.started_at else None,
-            "last_run_duration_sec": last.duration_seconds if last else None,
+            **_recon_fields(last),
         })
     return {"version": DASHBOARD_VERSION, "schema": settings.ora2pg_target_schema, "tables": items}
+
+
+def _iso(dt: datetime | None) -> str | None:
+    return dt.isoformat() if dt else None
+
+
+def _csv_response(rows: list[dict[str, Any]], filename: str) -> Response:
+    """Render rows (list of flat dicts) as a downloadable CSV. Empty list → header-less file."""
+    buf = io.StringIO()
+    if rows:
+        writer = csv.DictWriter(buf, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)
+    return Response(
+        content=buf.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+def _run_report_row(run: MigrationRun) -> dict[str, Any]:
+    job = run.job
+    src, tgt = run.source_row_count, run.target_row_count
+    missed = (src - tgt) if (src is not None and tgt is not None) else None
+    return {
+        "run_id": str(run.id),
+        "source_table": job.source_table if job else None,
+        "target": f"{job.target_schema}.{job.target_table}" if job else None,
+        "run_type": run.run_type,
+        "status": run.status,
+        "validation_status": run.validation_status,
+        "source_row_count": src,
+        "target_row_count": tgt,
+        "missed": missed,
+        "duration_sec": run.duration_seconds,
+        "started_at": _iso(run.started_at),
+        "finished_at": _iso(run.finished_at),
+        "repair_where": (
+            f"{job.watermark_column} >= <cutoff>"
+            if job and job.watermark_column
+            else None
+        ),
+    }
+
+
+@router.get("/runs/{run_id}/report")
+def run_report(
+    run_id: uuid.UUID,
+    db: Annotated[Session, Depends(get_db)],
+    format: str = "json",
+) -> Any:
+    """Downloadable reconciliation report for one run (source/target/missed/verdict/duration +
+    the individual validation checks), built from migration_runs + migration_validations."""
+    run = db.get(MigrationRun, run_id)
+    if run is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
+    summary = _run_report_row(run)
+    if format == "csv":
+        return _csv_response([summary], f"reconciliation_run_{run_id}.csv")
+    validations = db.scalars(
+        select(MigrationValidation)
+        .where(MigrationValidation.migration_run_id == run_id)
+        .order_by(MigrationValidation.created_at.asc(), MigrationValidation.check_name.asc())
+    ).all()
+    return {
+        **summary,
+        "validations": [
+            {
+                "check_name": v.check_name,
+                "status": v.status,
+                "source_value": v.source_value,
+                "target_value": v.target_value,
+                "message": v.message,
+            }
+            for v in validations
+        ],
+    }
+
+
+@router.get("/reconciliation")
+def reconciliation_export(
+    db: Annotated[Session, Depends(get_db)],
+    format: str = "json",
+) -> Any:
+    """Reconciliation log across all catalog tables (latest run each) — JSON or CSV."""
+    rows: list[dict[str, Any]] = []
+    for t in MIGRATABLE_TABLES:
+        job = db.scalar(select(MigrationJob).where(MigrationJob.name == _job_name(t.target_table)))
+        last = _latest_run(db, job.id) if job else None
+        src = last.source_row_count if last else None
+        tgt = last.target_row_count if last else None
+        missed = (src - tgt) if (src is not None and tgt is not None) else None
+        rows.append({
+            "table": t.table,
+            "module": t.module,
+            "target": f"{settings.ora2pg_target_schema}.{t.target_table}",
+            "source_row_count": src,
+            "target_row_count": tgt,
+            "missed": missed,
+            "validation_status": last.validation_status if last else None,
+            "last_run_status": last.status if last else None,
+            "duration_sec": last.duration_seconds if last else None,
+            "started_at": _iso(last.started_at) if last else None,
+            "finished_at": _iso(last.finished_at) if last else None,
+            "run_id": str(last.id) if last else None,
+            "repair_where": f"{t.ts_col} >= <cutoff>" if t.ts_col else None,
+        })
+    if format == "csv":
+        return _csv_response(rows, "reconciliation.csv")
+    return {"version": DASHBOARD_VERSION, "schema": settings.ora2pg_target_schema,
+            "generated_from": "migration_runs + migration_validations", "tables": rows}

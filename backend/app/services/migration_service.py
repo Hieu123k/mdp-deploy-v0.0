@@ -253,6 +253,41 @@ def _validation(
     )
 
 
+def reconcile_ora2pg_run(
+    db: Session, run: MigrationRun, *, source_rows: int | None = None
+) -> dict[str, Any]:
+    """Reconcile an ora2pg run: reuse ``validate_target_table`` to count the target and
+    write ``MigrationValidation`` rows, then stamp a coarse ``validation_status`` of
+    ``MATCH`` / ``MISMATCH`` / ``PENDING`` (source-vs-target row count). This is additive —
+    it never touches ``run.status`` (the exit-0 lifecycle verdict), only the separate
+    ``validation_status`` field. ``missed = source - target`` when both are known.
+    """
+    if source_rows is not None and run.source_row_count is None:
+        run.source_row_count = source_rows
+        db.add(run)
+        db.flush()
+
+    result = validate_target_table(db, run)  # writes validations + sets target_row_count
+
+    match = result.get("row_count_match")
+    status = "MATCH" if match is True else "MISMATCH" if match is False else "PENDING"
+    missed = None
+    if run.source_row_count is not None and result.get("target_row_count") is not None:
+        missed = run.source_row_count - result["target_row_count"]
+
+    run = db.get(MigrationRun, run.id)
+    run.validation_status = status
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+    return {
+        "validation_status": status,
+        "source_row_count": run.source_row_count,
+        "target_row_count": result.get("target_row_count"),
+        "missed": missed,
+    }
+
+
 def validate_target_table(db: Session, run: MigrationRun) -> dict[str, Any]:
     job = run.job
     target_schema = job.target_schema

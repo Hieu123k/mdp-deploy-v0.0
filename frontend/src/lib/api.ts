@@ -716,6 +716,22 @@ export type Ora2pgTable = {
   last_run_id: string | null;
   last_run_status: string | null;
   last_run_at: string | null;
+  last_source_rows: number | null;
+  last_target_rows: number | null;
+  last_missed: number | null;
+  last_validation_status: string | null;
+  last_run_duration_sec: number | null;
+};
+export type Ora2pgVerifyResult = {
+  table: string;
+  target_table: string;
+  source_rows: number | null;
+  target_rows: number | null;
+  missed: number | null;
+  validation_status: string;
+  source_available: boolean;
+  last_run_id: string | null;
+  message: string;
 };
 export type Ora2pgStatusItem = {
   table: string;
@@ -760,6 +776,30 @@ export const ora2pgGetRun = (runId: string) =>
   req<Ora2pgProgress>(`/ora2pg/runs/${encodeURIComponent(runId)}`);
 export const ora2pgStatus = () =>
   req<{ version: string; schema: string; tables: Ora2pgStatusItem[] }>("/ora2pg/status");
+export const ora2pgVerify = (table: string) =>
+  req<Ora2pgVerifyResult>(
+    `/ora2pg/tables/${encodeURIComponent(table)}/verify`,
+    { method: "POST" },
+  );
+export const ora2pgRepair = (table: string, cutoff?: string) =>
+  req<{ run_id: string; table: string; mode: string; status: string; stream_url?: string; message?: string }>(
+    `/ora2pg/tables/${encodeURIComponent(table)}/repair${cutoff ? `?cutoff=${encodeURIComponent(cutoff)}` : ""}`,
+    { method: "POST" },
+  );
+
+/** Download the reconciliation log (json|csv) via an authed fetch + blob. */
+export async function ora2pgDownloadReconciliation(format: "json" | "csv"): Promise<void> {
+  const res = await apiFetch(`/ora2pg/reconciliation?format=${format}`);
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `reconciliation.${format}`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
 
 /**
  * Open the SSE progress stream for a run (auth via Bearer header, so we read the

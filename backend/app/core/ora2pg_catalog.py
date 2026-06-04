@@ -75,12 +75,23 @@ def _pg_target_parts() -> dict[str, str]:
     }
 
 
-def build_ora2pg_conf(table: Ora2pgTable, *, test_rows: int = 0) -> str:
+def build_ora2pg_conf(
+    table: Ora2pgTable,
+    *,
+    test_rows: int = 0,
+    truncate: bool = True,
+    where_clause: str | None = None,
+) -> str:
     """Render an ora2pg.conf for one table (mirrors tools/ora2pg migrate.sh dynamic config).
 
     Returns the full config text. Credentials come from settings/env. The returned
     text DOES contain runtime secrets and must only be written to the (gitignored)
     shared volume — never logged or committed. Use `redact_conf()` for logging.
+
+    Repair-delta mode (additive, defaults preserve the original full-load output):
+    ``truncate=False`` emits ``TRUNCATE_TABLE 0`` so ``-t COPY`` *appends* instead of
+    wiping the table; ``where_clause`` injects an ora2pg ``WHERE`` directive (e.g.
+    ``V2_PRO_F0911[UPMJ >= 124001]``) to re-pull only a watermark range.
     """
     pg = _pg_target_parts()
     oracle_dsn = f"dbi:Oracle:host={settings.oracle_host};port={settings.oracle_port}"
@@ -108,7 +119,7 @@ def build_ora2pg_conf(table: Ora2pgTable, *, test_rows: int = 0) -> str:
         "CREATE_SCHEMA    0",
         "DEFAULT_NUMERIC  numeric",
         "DROP_IF_EXISTS   1",
-        "TRUNCATE_TABLE   1",
+        f"TRUNCATE_TABLE   {1 if truncate else 0}",
         "PRESERVE_CASE    0",
         "DISABLE_TRIGGERS 1",
         "DROP_FKEY        0",
@@ -120,7 +131,9 @@ def build_ora2pg_conf(table: Ora2pgTable, *, test_rows: int = 0) -> str:
         "FILE_PER_TABLE   1",
         "NULLIF           ''",
     ]
-    if test_rows and test_rows > 0:
+    if where_clause:
+        lines.append(f"WHERE            {where_clause}")
+    elif test_rows and test_rows > 0:
         lines.append(f"WHERE            ROWNUM <= {int(test_rows)}")
     return "\n".join(lines) + "\n"
 
