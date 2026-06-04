@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy.engine.url import make_url
 
@@ -57,6 +58,47 @@ _BY_NAME = {t.table.upper(): t for t in MIGRATABLE_TABLES}
 
 def get_table(name: str) -> Ora2pgTable | None:
     return _BY_NAME.get((name or "").upper())
+
+
+def get_effective_catalog(db: Any) -> list[Ora2pgTable]:
+    """The catalog the dashboard actually serves: the static JSON base OVERLAID with admin
+    edits stored as ``reference_options`` rows (list_key ``ora2pg_tables``). A row overrides a
+    base table's label/module/ts_col, adds a new table, or — when ``is_active`` is false —
+    hides a base table. Falls back to the pure JSON base when nothing is seeded yet (e.g. the
+    sqlite test DB), so existing behaviour is unchanged."""
+    from sqlalchemy import select  # local import keeps module import cheap / avoids cycles
+
+    from app.models.reference import ReferenceOption
+
+    rows = list(
+        db.scalars(
+            select(ReferenceOption)
+            .where(ReferenceOption.list_key == "ora2pg_tables", ReferenceOption.is_active.is_(True))
+            .order_by(ReferenceOption.sort_order.asc(), ReferenceOption.value.asc())
+        )
+    )
+    if not rows:
+        return list(MIGRATABLE_TABLES)
+    base = {t.table.upper(): t for t in MIGRATABLE_TABLES}
+    out: list[Ora2pgTable] = []
+    for r in rows:
+        extra = r.extra or {}
+        b = base.get(r.value.upper())
+        out.append(Ora2pgTable(
+            table=r.value,
+            label=r.label or (b.label if b else r.value),
+            module=extra.get("module") or (b.module if b else "Other"),
+            ts_col=extra.get("ts_col", b.ts_col if b else None),
+        ))
+    return out
+
+
+def get_effective_table(db: Any, name: str) -> Ora2pgTable | None:
+    name_u = (name or "").upper()
+    for t in get_effective_catalog(db):
+        if t.table.upper() == name_u:
+            return t
+    return None
 
 
 def _pg_target_parts() -> dict[str, str]:

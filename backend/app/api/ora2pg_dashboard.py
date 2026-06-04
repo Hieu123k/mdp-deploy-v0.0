@@ -22,9 +22,9 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_current_user
 from app.core.config import settings
 from app.core.ora2pg_catalog import (
-    MIGRATABLE_TABLES,
     build_ora2pg_conf,
-    get_table,
+    get_effective_catalog,
+    get_effective_table,
     redact_conf,
 )
 from app.db.session import get_db
@@ -157,20 +157,20 @@ def _run_snapshot(db: Session, run: MigrationRun) -> dict[str, Any]:
 
 
 @router.get("/info")
-def dashboard_info() -> dict[str, Any]:
+def dashboard_info(db: Annotated[Session, Depends(get_db)]) -> dict[str, Any]:
     return {
         "version": DASHBOARD_VERSION,
         "ora2pg_container": settings.ora2pg_container,
         "target_schema": settings.ora2pg_target_schema,
         "oracle_configured": bool(settings.oracle_host and settings.oracle_user),
-        "table_count": len(MIGRATABLE_TABLES),
+        "table_count": len(get_effective_catalog(db)),
     }
 
 
 @router.get("/tables")
 def list_tables(db: Annotated[Session, Depends(get_db)]) -> dict[str, Any]:
     items = []
-    for t in MIGRATABLE_TABLES:
+    for t in get_effective_catalog(db):
         job = db.scalar(select(MigrationJob).where(MigrationJob.name == _job_name(t.target_table)))
         last = _latest_run(db, job.id) if job else None
         items.append({
@@ -192,10 +192,10 @@ def list_tables(db: Annotated[Session, Depends(get_db)]) -> dict[str, Any]:
 
 
 @router.get("/tables/{table_name}/config-preview")
-def config_preview(table_name: str) -> dict[str, Any]:
+def config_preview(table_name: str, db: Annotated[Session, Depends(get_db)]) -> dict[str, Any]:
     """Return the ora2pg.conf that would be generated (secrets redacted) — proves the
     config is built from env without exposing credentials and without running anything."""
-    table = get_table(table_name)
+    table = get_effective_table(db, table_name)
     if table is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown table")
     return {
@@ -212,7 +212,7 @@ def start_migration(
     current_user: Annotated[User, Depends(get_current_user)],
     test_rows: int = 0,
 ) -> dict[str, Any]:
-    table = get_table(table_name)
+    table = get_effective_table(db, table_name)
     if table is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown table")
     job = _get_or_create_job(db, table)
@@ -255,7 +255,7 @@ def verify_table(
     """On-demand reconciliation: exact COUNT(*) of the target now, compared to the source
     count recorded by the last run. (Live Oracle source count runs only where Oracle is
     reachable — `.63`; on the VPS the source is the stored last-run count.)"""
-    table = get_table(table_name)
+    table = get_effective_table(db, table_name)
     if table is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown table")
     job = db.scalar(select(MigrationJob).where(MigrationJob.name == _job_name(table.target_table)))
@@ -314,7 +314,7 @@ def repair_table(
     - ``full`` — full reload.
     When ``mode`` is omitted it auto-selects: pk → watermark → full, by what's available.
     """
-    table = get_table(table_name)
+    table = get_effective_table(db, table_name)
     if table is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown table")
     if cutoff is not None and not str(cutoff).lstrip("-").isdigit():
@@ -408,7 +408,7 @@ async def stream_run(run_id: uuid.UUID, db: Annotated[Session, Depends(get_db)])
 @router.get("/status")
 def db_status(db: Annotated[Session, Depends(get_db)]) -> dict[str, Any]:
     items = []
-    for t in MIGRATABLE_TABLES:
+    for t in get_effective_catalog(db):
         job = db.scalar(select(MigrationJob).where(MigrationJob.name == _job_name(t.target_table)))
         last = _latest_run(db, job.id) if job else None
         items.append({
@@ -509,7 +509,7 @@ def reconciliation_export(
 ) -> Any:
     """Reconciliation log across all catalog tables (latest run each) — JSON or CSV."""
     rows: list[dict[str, Any]] = []
-    for t in MIGRATABLE_TABLES:
+    for t in get_effective_catalog(db):
         job = db.scalar(select(MigrationJob).where(MigrationJob.name == _job_name(t.target_table)))
         last = _latest_run(db, job.id) if job else None
         src = last.source_row_count if last else None
@@ -542,7 +542,7 @@ def list_keys(db: Annotated[Session, Depends(get_db)]) -> dict[str, Any]:
     tables can use precise PK-repair vs the watermark/full-reload fallback."""
     items = []
     have = 0
-    for t in MIGRATABLE_TABLES:
+    for t in get_effective_catalog(db):
         job = db.scalar(select(MigrationJob).where(MigrationJob.name == _job_name(t.target_table)))
         pk = job.primary_key_columns if job else None
         if pk:
@@ -551,7 +551,7 @@ def list_keys(db: Annotated[Session, Depends(get_db)]) -> dict[str, Any]:
             "table": t.table, "module": t.module, "target_table": t.target_table,
             "pk_columns": pk, "repair_mode": "pk" if pk else ("watermark" if t.ts_col else "full"),
         })
-    return {"version": DASHBOARD_VERSION, "with_pk": have, "total": len(MIGRATABLE_TABLES), "tables": items}
+    return {"version": DASHBOARD_VERSION, "with_pk": have, "total": len(get_effective_catalog(db)), "tables": items}
 
 
 @router.post("/discover-keys")
@@ -562,13 +562,13 @@ def discover_keys(
     """Discover each table's PK from the Oracle unique index and persist it onto the table's
     MigrationJob.primary_key_columns. Needs Oracle → real only on `.63`; on the VPS it returns
     available=False (all pk null) without error, so the contract is still testable."""
-    discovery = discover_oracle_keys(MIGRATABLE_TABLES)
+    discovery = discover_oracle_keys(get_effective_catalog(db))
     persisted = 0
     if discovery.get("available"):
         for r in discovery["results"]:
             if not r.get("pk_columns"):
                 continue
-            table = get_table(r["source_view"])
+            table = get_effective_table(db, r["source_view"])
             if table is None:
                 continue
             job = _get_or_create_job(db, table)

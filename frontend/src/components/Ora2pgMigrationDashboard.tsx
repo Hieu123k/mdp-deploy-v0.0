@@ -1,7 +1,8 @@
 "use client";
 
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { CheckCircle2, Database, Download, Play, RefreshCw, Terminal } from "lucide-react";
+import { CheckCircle2, Database, Download, Play, Plus, RefreshCw, Settings, Terminal, Trash2 } from "lucide-react";
+import { useAuth } from "@/components/auth/AuthProvider";
 import { Badge, type BadgeTone } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card, CardBody, CardHeader } from "@/components/ui/Card";
@@ -10,6 +11,9 @@ import { Select } from "@/components/ui/Select";
 import { Table, TBody, TD, TH, THead, TR } from "@/components/ui/Table";
 import {
   ApiError,
+  createReferenceOption,
+  deleteReferenceOption,
+  getReferenceList,
   ora2pgConfigPreview,
   ora2pgDownloadReconciliation,
   ora2pgGetRun,
@@ -22,6 +26,7 @@ import {
   type Ora2pgInfo,
   type Ora2pgProgress,
   type Ora2pgTable,
+  type ReferenceOption,
 } from "@/lib/api";
 
 function fmtInt(n: number | null | undefined): string {
@@ -80,6 +85,9 @@ export function Ora2pgMigrationDashboard() {
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const [verifying, setVerifying] = useState<string | null>(null);
+  const { user } = useAuth();
+  const isAdmin = user?.role === "admin";
+  const [managingTables, setManagingTables] = useState(false);
 
   const loadTables = useCallback(async () => {
     try {
@@ -328,7 +336,14 @@ export function Ora2pgMigrationDashboard() {
           <Button variant="ghost" size="md" onClick={onPreviewConf} disabled={loadingConf || !selected}>
             <Terminal size={16} /> ora2pg.conf
           </Button>
+          {isAdmin && (
+            <Button variant="ghost" size="md" onClick={() => setManagingTables((m) => !m)}>
+              <Settings size={16} /> Manage tables
+            </Button>
+          )}
         </div>
+
+        {isAdmin && managingTables && <ManageOra2pgTables onChanged={loadTables} />}
 
         {error && (
           <p className="rounded-md bg-danger/10 px-3 py-2 text-sm text-danger ring-1 ring-inset ring-danger/20">
@@ -523,6 +538,97 @@ function Stat({ label, value }: { label: string; value: string }) {
     <div>
       <div className="text-xs uppercase tracking-wide text-neutral-400">{label}</div>
       <div className="font-mono text-sm font-semibold text-neutral-800">{value}</div>
+    </div>
+  );
+}
+
+// Admin-only inline manager for the ora2pg "Source table" catalog (add / remove tables).
+// Persists to /reference/ora2pg_tables, which the dashboard overlays on the JSON catalog.
+function ManageOra2pgTables({ onChanged }: { onChanged: () => void | Promise<void> }) {
+  const [rows, setRows] = useState<ReferenceOption[]>([]);
+  const [view, setView] = useState("");
+  const [module, setModule] = useState("");
+  const [ts, setTs] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      setRows((await getReferenceList("ora2pg_tables")).options);
+    } catch {
+      /* ignore */
+    }
+  }, []);
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const add = async () => {
+    const v = view.trim().toUpperCase();
+    if (!v) return;
+    setError(null);
+    try {
+      await createReferenceOption("ora2pg_tables", {
+        value: v,
+        label: `${v.replace(/^V2_PRO_/, "")} — ${module.trim() || "custom"}`,
+        extra: { target_table: v.toLowerCase(), module: module.trim() || "Other", ts_col: ts.trim() || null },
+      });
+      setView("");
+      setModule("");
+      setTs("");
+      await load();
+      await onChanged();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Add failed");
+    }
+  };
+
+  const remove = async (id: string, value: string) => {
+    if (!window.confirm(`Remove ${value} from the migration catalog?`)) return;
+    setError(null);
+    try {
+      await deleteReferenceOption("ora2pg_tables", id);
+      await load();
+      await onChanged();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Remove failed");
+    }
+  };
+
+  return (
+    <div className="rounded-md border border-neutral-200 bg-neutral-50 p-3 text-xs">
+      <div className="mb-2 font-medium text-neutral-700">Manage source tables (admin) · {rows.length} entries</div>
+      <div className="mb-3 flex flex-wrap items-end gap-2">
+        <label className="block">
+          <span className="mb-1 block text-neutral-500">Source view</span>
+          <input className="h-8 w-44 rounded border border-neutral-300 px-2 font-mono" placeholder="V2_PRO_F9999" value={view} onChange={(e) => setView(e.target.value)} />
+        </label>
+        <label className="block">
+          <span className="mb-1 block text-neutral-500">Module</span>
+          <input className="h-8 w-40 rounded border border-neutral-300 px-2" placeholder="Inventory Management" value={module} onChange={(e) => setModule(e.target.value)} />
+        </label>
+        <label className="block">
+          <span className="mb-1 block text-neutral-500">ts_col (optional)</span>
+          <input className="h-8 w-28 rounded border border-neutral-300 px-2 font-mono" placeholder="upmj" value={ts} onChange={(e) => setTs(e.target.value)} />
+        </label>
+        <button type="button" onClick={add} className="inline-flex h-8 items-center gap-1 rounded bg-brand px-2 text-white hover:bg-brand/90">
+          <Plus size={13} /> Add table
+        </button>
+      </div>
+      {error && <p className="mb-2 text-danger">{error}</p>}
+      <div className="max-h-56 space-y-1 overflow-y-auto">
+        {rows.map((o) => (
+          <div key={o.id} className="flex items-center gap-2">
+            <span className="w-40 truncate font-mono text-neutral-800">{o.value}</span>
+            <span className="flex-1 truncate text-neutral-500">
+              {(o.extra?.module as string) || "—"}
+              {o.extra?.ts_col ? ` · ts:${o.extra.ts_col as string}` : ""}
+            </span>
+            <button type="button" title="Remove" onClick={() => remove(o.id, o.value)} className="inline-flex h-7 w-7 items-center justify-center rounded border border-neutral-300 text-neutral-600 hover:bg-neutral-100">
+              <Trash2 size={12} />
+            </button>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

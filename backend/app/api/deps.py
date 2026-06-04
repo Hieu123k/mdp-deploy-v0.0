@@ -55,6 +55,18 @@ def get_current_user(
     return user
 
 
+def require_admin(
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> User:
+    """Allow only admin users (write access to reference lists / catalog)."""
+    if current_user.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin role required",
+        )
+    return current_user
+
+
 def get_request_auth_context(
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)],
     db: Annotated[Session, Depends(get_db)],

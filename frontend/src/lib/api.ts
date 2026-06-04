@@ -804,6 +804,38 @@ export type Ora2pgKeyItem = {
 };
 export const ora2pgKeys = () =>
   req<{ version: string; with_pk: number; total: number; tables: Ora2pgKeyItem[] }>("/ora2pg/keys");
+
+// ----- Editable reference lists (admin-managed dropdowns / fixed fields) -----
+export type ReferenceOption = {
+  id: string;
+  list_key: string;
+  value: string;
+  label: string | null;
+  sort_order: number;
+  extra: Record<string, unknown> | null;
+  is_active: boolean;
+};
+export const getReferenceList = (listKey: string) =>
+  req<{ list_key: string; options: ReferenceOption[] }>(`/reference/${encodeURIComponent(listKey)}`);
+export const createReferenceOption = (
+  listKey: string,
+  body: { value: string; label?: string; sort_order?: number; extra?: Record<string, unknown> },
+) =>
+  req<ReferenceOption>(`/reference/${encodeURIComponent(listKey)}`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+export const updateReferenceOption = (
+  listKey: string,
+  id: string,
+  body: Partial<{ value: string; label: string; sort_order: number; extra: Record<string, unknown>; is_active: boolean }>,
+) =>
+  req<ReferenceOption>(`/reference/${encodeURIComponent(listKey)}/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(body),
+  });
+export const deleteReferenceOption = (listKey: string, id: string) =>
+  req<void>(`/reference/${encodeURIComponent(listKey)}/${id}`, { method: "DELETE" });
 export const ora2pgDiscoverKeys = () =>
   req<{ available: boolean; message: string | null; persisted: number; results: unknown[] }>(
     "/ora2pg/discover-keys",

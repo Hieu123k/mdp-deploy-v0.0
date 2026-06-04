@@ -9,6 +9,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Modal } from "@/components/ui/Modal";
 import { Input } from "@/components/ui/Input";
 import { Select } from "@/components/ui/Select";
+import { EditableSelect } from "@/components/ui/EditableSelect";
 import { Table, THead, TBody, TR, TH, TD } from "@/components/ui/Table";
 import {
   ApiError,
@@ -60,18 +61,6 @@ const DOMAINS = [
   "iiot",
   "other",
 ];
-const BUSINESS_PROCESSES = [
-  "procure_to_pay",
-  "order_to_cash",
-  "plan_to_produce",
-  "quality_management",
-  "maintenance_management",
-  "inventory_management",
-  "asset_management",
-  "energy_management",
-  "iiot_monitoring",
-  "other",
-];
 const SOURCE_LAYERS = [
   "source",
   "staging",
@@ -82,10 +71,8 @@ const SOURCE_LAYERS = [
   "generated_table",
 ];
 const CANONICAL_STATUSES = ["source_aligned", "canonical", "curated", "experimental", "deprecated"];
-const SITE_SCOPES = ["enterprise", "site", "area", "line", "work_center", "asset", "not_applicable"];
-const SENSITIVITY_LEVELS = ["public", "internal", "confidential", "restricted"];
-const SOURCE_SYSTEMS = ["JDE ERP", "External API", "Manual / Mock Data", "SQL Server", "PostgreSQL", "Other"];
-const OWNER_DEPARTMENTS = ["Procurement", "Finance", "Operations", "Quality", "Maintenance", "IT/OT", "Other"];
+// Business-process / site-scope / sensitivity / source-system / owner-department options are now
+// admin-managed reference lists (see EditableSelect + /reference); the editor reads them live.
 
 type Mode = "create" | "view" | "edit" | "preview";
 type FormState = {
@@ -1275,44 +1262,21 @@ export default function DataModelsPage() {
           subtitle="Namespace helps future catalog, semantic search, IIoT hierarchy, and AI access."
         >
           <div className="grid gap-3 md:grid-cols-3">
-            <Select label="Domain" value={form.domain} onChange={(event) => patchForm({ domain: event.target.value, category: event.target.value })}>
-              <option value="">-</option>
-              {DOMAINS.map((item) => <option key={item} value={item}>{titleize(item)}</option>)}
-            </Select>
+            <EditableSelect listKey="domains" label="Domain" value={form.domain} onChange={(v) => patchForm({ domain: v, category: v })} includeEmpty="-" format={titleize} />
             <Input label="Entity type" value={form.entity_type} onChange={(event) => patchForm({ entity_type: snake(event.target.value) })} />
-            <Select label="Business process" value={form.business_process} onChange={(event) => patchForm({ business_process: event.target.value })}>
-              <option value="">-</option>
-              {BUSINESS_PROCESSES.map((item) => <option key={item} value={item}>{titleize(item)}</option>)}
-            </Select>
+            <EditableSelect listKey="business_processes" label="Business process" value={form.business_process} onChange={(v) => patchForm({ business_process: v })} includeEmpty="-" format={titleize} />
             <Input className="font-mono" label="Namespace" value={form.namespace} onChange={(event) => patchForm({ namespace: event.target.value })} />
-            <Select label="Source layer" value={form.source_layer} onChange={(event) => patchForm({ source_layer: event.target.value })}>
-              <option value="">Infer automatically</option>
-              {SOURCE_LAYERS.map((item) => <option key={item} value={item}>{titleize(item)}</option>)}
-            </Select>
-            <Select label="Canonical status" value={form.canonical_status} onChange={(event) => patchForm({ canonical_status: event.target.value })}>
-              <option value="">-</option>
-              {CANONICAL_STATUSES.map((item) => <option key={item} value={item}>{titleize(item)}</option>)}
-            </Select>
-            <Select label="Site scope" value={form.site_scope} onChange={(event) => patchForm({ site_scope: event.target.value })}>
-              <option value="">-</option>
-              {SITE_SCOPES.map((item) => <option key={item} value={item}>{titleize(item)}</option>)}
-            </Select>
+            <EditableSelect listKey="source_layers" label="Source layer" value={form.source_layer} onChange={(v) => patchForm({ source_layer: v })} includeEmpty="Infer automatically" format={titleize} />
+            <EditableSelect listKey="canonical_statuses" label="Canonical status" value={form.canonical_status} onChange={(v) => patchForm({ canonical_status: v })} includeEmpty="-" format={titleize} />
+            <EditableSelect listKey="site_scopes" label="Site scope" value={form.site_scope} onChange={(v) => patchForm({ site_scope: v })} includeEmpty="-" format={titleize} />
           </div>
         </DrawerSection>
 
         <DrawerSection title="Ownership & Governance">
           <div className="grid gap-3 md:grid-cols-3">
-            <Select label="Source system" value={form.source_system} onChange={(event) => patchForm({ source_system: event.target.value })}>
-              <option value="">-</option>
-              {SOURCE_SYSTEMS.map((item) => <option key={item} value={item}>{item}</option>)}
-            </Select>
-            <Select label="Owner department" value={form.owner_department} onChange={(event) => patchForm({ owner_department: event.target.value })}>
-              <option value="">-</option>
-              {OWNER_DEPARTMENTS.map((item) => <option key={item} value={item}>{item}</option>)}
-            </Select>
-            <Select label="Sensitivity" value={form.sensitivity_level} onChange={(event) => patchForm({ sensitivity_level: event.target.value })}>
-              {SENSITIVITY_LEVELS.map((item) => <option key={item} value={item}>{titleize(item)}</option>)}
-            </Select>
+            <EditableSelect listKey="source_systems" label="Source system" value={form.source_system} onChange={(v) => patchForm({ source_system: v })} includeEmpty="-" />
+            <EditableSelect listKey="owner_departments" label="Owner department" value={form.owner_department} onChange={(v) => patchForm({ owner_department: v })} includeEmpty="-" />
+            <EditableSelect listKey="sensitivity_levels" label="Sensitivity" value={form.sensitivity_level} onChange={(v) => patchForm({ sensitivity_level: v })} format={titleize} />
             <Input label="Refresh policy" value={form.refresh_policy} onChange={(event) => patchForm({ refresh_policy: event.target.value })} />
             <Select label="Status" value={form.status} onChange={(event) => patchForm({ status: event.target.value })}>
               <option value="active">Active</option>
@@ -1410,7 +1374,9 @@ export default function DataModelsPage() {
         </THead>
         <TBody>
           {form.attributes.map((attribute, index) => (
-            <TR key={`${attribute.name}-${index}`}>
+            // Key by position only — keying by `attribute.name` (which the first input edits)
+            // remounted the row on every keystroke, so the field lost focus after one character.
+            <TR key={index}>
               <TD>
                 <Input
                   aria-label="Attribute name"
