@@ -142,7 +142,6 @@ def update_data_model(
     data_model: DataModel,
     data_model_in: DataModelUpdate,
 ) -> DataModel:
-    # TODO: Handle generated table schema evolution in a later milestone.
     update_payload = validate_updated_data_model(data_model, data_model_in)
     validated = DataModelCreate.model_validate(update_payload)
     if validated.type == "B":
@@ -150,6 +149,12 @@ def update_data_model(
     update_payload.pop("generated_table", None)
     for field, value in update_payload.items():
         setattr(data_model, field, value)
+
+    # Type A: keep the physical generated table in sync with the (possibly changed) attributes —
+    # add any new columns so the model definition never silently diverges from the table and
+    # inbound keeps working with the new attributes. Non-destructive (never drops columns).
+    if data_model.type == "A":
+        table_generator.sync_generated_table_columns(db, data_model)
 
     db.add(data_model)
     db.commit()

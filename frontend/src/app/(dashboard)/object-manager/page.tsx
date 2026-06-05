@@ -126,7 +126,9 @@ function snake(value: string): string {
     .trim()
     .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
     .replace(/[^A-Za-z0-9]+/g, "_")
-    .replace(/^_+|_+$/g, "")
+    // strip only LEADING underscores — keeping a trailing "_" lets the user type names like
+    // `invoice_no` live (otherwise the "_" is eaten the instant it's typed, giving `invoiceno`).
+    .replace(/^_+/g, "")
     .toLowerCase();
 }
 
@@ -1343,7 +1345,7 @@ export default function DataModelsPage() {
     return (
       <DrawerSection
         title="Type A Attributes"
-        subtitle="Updating attributes does not alter the existing generated physical table in this MVP."
+        subtitle="Saving adds any new attribute as a column on the generated table. Existing columns are kept (no drop/rename), so no data is lost."
       >
         {renderAttributesTable(false)}
         <Button size="sm" variant="secondary" onClick={addAttribute} className="mt-3">Add Attribute</Button>
@@ -1410,7 +1412,10 @@ export default function DataModelsPage() {
         </THead>
         <TBody>
           {form.attributes.map((attribute, index) => (
-            <TR key={`${attribute.name}-${index}`}>
+            // Key by position only — keying by `attribute.name` (the value the first input
+            // edits) remounted the row on every keystroke, so the field lost focus after one
+            // character. updateAttribute already updates immutably by index.
+            <TR key={index}>
               <TD>
                 <Input
                   aria-label="Attribute name"

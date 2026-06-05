@@ -101,3 +101,44 @@ def create_generated_table_for_model(db: Session, model: Any) -> str:
 
     db.execute(text(f"CREATE TABLE {quoted_table_name} ({', '.join(columns)})"))
     return table_name
+
+
+def sync_generated_table_columns(db: Session, model: Any) -> list[str]:
+    """Keep a Type A model's physical generated table in sync with its attributes by ADDING
+    any column the model now declares but the table is missing.
+
+    Non-destructive on purpose: it never drops or renames columns, so editing a model can't
+    lose data, and the physical table is always a superset of the attribute columns — which is
+    what ``insert_inbound_record`` needs (it builds its column list from the attributes; a
+    missing column would make every inbound insert fail). A removed/renamed attribute simply
+    leaves an unused column behind. Returns the names of the columns that were added.
+    """
+    if db.bind and db.bind.dialect.name != "postgresql":
+        return []
+    if not generated_table_exists(db, model.name):
+        return []
+    validate_generated_column_names(model.attributes)
+    table_name = get_generated_table_name(model.name)
+    schema_name, bare_table_name = table_name.split(".", 1)
+    existing = {
+        row[0]
+        for row in db.execute(
+            text(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = :schema AND table_name = :table"
+            ),
+            {"schema": schema_name, "table": bare_table_name},
+        )
+    }
+    quoted_table_name = f"{quote_identifier(schema_name)}.{quote_identifier(bare_table_name)}"
+    added: list[str] = []
+    for attribute in model.attributes:
+        name = attribute["name"]
+        if name in SYSTEM_COLUMN_NAMES or name in existing:
+            continue
+        column_type = map_data_type_to_postgres(attribute["data_type"])
+        db.execute(
+            text(f"ALTER TABLE {quoted_table_name} ADD COLUMN IF NOT EXISTS {quote_identifier(name)} {column_type}")
+        )
+        added.append(name)
+    return added
