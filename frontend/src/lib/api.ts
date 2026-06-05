@@ -722,6 +722,14 @@ export type Ora2pgTable = {
   last_validation_status: string | null;
   last_run_duration_sec: number | null;
   pk_columns: string[] | null;
+  // Source-count cache (background estimate + on-demand exact); populated on page load.
+  source_count: number | null;
+  source_count_mode: string | null; // estimate | exact
+  source_count_at: string | null;
+  source_approximate: boolean | null;
+  source_stale: boolean;
+  source_missed: number | null;
+  source_verdict: string | null; // MATCH | MISMATCH | ESTIMATE | PENDING
 };
 export type Ora2pgVerifyResult = {
   table: string;

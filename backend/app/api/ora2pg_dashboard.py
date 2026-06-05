@@ -29,7 +29,13 @@ from app.core.ora2pg_catalog import (
 )
 from app.db.session import get_db
 from app.models.migration import MigrationJob, MigrationRun, MigrationValidation
+from app.models.source_count import Ora2pgSourceCount
 from app.models.user import User
+from app.services.source_count_service import (
+    get_all_source_counts,
+    source_verdict,
+    verify_exact,
+)
 from app.services.ora2pg_runner import (
     discover_oracle_keys,
     get_progress,
@@ -125,6 +131,24 @@ def _recon_fields(last: "MigrationRun | None") -> dict[str, Any]:
     }
 
 
+def _source_count_fields(row: "Ora2pgSourceCount | None", current_rows: int | None) -> dict[str, Any]:
+    """Source-count cache fields for a table (read from the cache — no Oracle call at load time).
+    `source_verdict` is MATCH/MISMATCH only when the cached count is EXACT; an estimate yields
+    ESTIMATE (not a red MISMATCH), nothing yields PENDING."""
+    missed = None
+    if row is not None and row.source_row_count is not None and current_rows is not None:
+        missed = row.source_row_count - current_rows
+    return {
+        "source_count": row.source_row_count if row else None,
+        "source_count_mode": row.count_mode if row else None,
+        "source_count_at": row.counted_at.isoformat() if row and row.counted_at else None,
+        "source_approximate": row.approximate if row else None,
+        "source_stale": (row.status != "ok") if row else False,
+        "source_missed": missed,
+        "source_verdict": source_verdict(row, current_rows),
+    }
+
+
 def _latest_run(db: Session, job_id: uuid.UUID) -> MigrationRun | None:
     return db.scalar(
         select(MigrationRun)
@@ -170,9 +194,11 @@ def dashboard_info() -> dict[str, Any]:
 @router.get("/tables")
 def list_tables(db: Annotated[Session, Depends(get_db)]) -> dict[str, Any]:
     items = []
+    source_cache = get_all_source_counts(db)  # read cache once; NO Oracle call at load time
     for t in MIGRATABLE_TABLES:
         job = db.scalar(select(MigrationJob).where(MigrationJob.name == _job_name(t.target_table)))
         last = _latest_run(db, job.id) if job else None
+        current_rows = _count_table(db, t.target_table)
         items.append({
             "table": t.table,
             "ts_col": t.ts_col,
@@ -180,13 +206,14 @@ def list_tables(db: Annotated[Session, Depends(get_db)]) -> dict[str, Any]:
             "module": t.module,
             "target_table": t.target_table,
             "target_schema": settings.ora2pg_target_schema,
-            "current_rows": _count_table(db, t.target_table),
+            "current_rows": current_rows,
             "cursor": _cursor_for(db, t.target_table),
             "last_run_id": str(last.id) if last else None,
             "last_run_status": last.status if last else None,
             "last_run_at": last.started_at.isoformat() if last and last.started_at else None,
             "pk_columns": job.primary_key_columns if job else None,
             **_recon_fields(last),
+            **_source_count_fields(source_cache.get(t.table.upper()), current_rows),
         })
     return {"version": DASHBOARD_VERSION, "tables": items}
 
@@ -252,9 +279,10 @@ def verify_table(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> dict[str, Any]:
-    """On-demand reconciliation: exact COUNT(*) of the target now, compared to the source
-    count recorded by the last run. (Live Oracle source count runs only where Oracle is
-    reachable — `.63`; on the VPS the source is the stored last-run count.)"""
+    """On-demand reconciliation: an EXACT COUNT(*) on the Oracle source view (cached) plus an
+    exact COUNT of the target, giving an official MATCH/MISMATCH. The exact Oracle count runs
+    only where Oracle is reachable (`.63`); on the VPS it degrades to `stale` and the verdict
+    stays ESTIMATE/PENDING (never a fake MISMATCH)."""
     table = get_table(table_name)
     if table is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown table")
@@ -262,37 +290,39 @@ def verify_table(
     last = _latest_run(db, job.id) if job else None
 
     target_rows = _count_table(db, table.target_table)  # exact COUNT (SAVEPOINT-guarded)
-    source_rows = last.source_row_count if last else None
-    missed = (source_rows - target_rows) if (source_rows is not None and target_rows is not None) else None
-    if source_rows is None or target_rows is None:
-        verdict = "PENDING"
-    else:
-        verdict = "MATCH" if missed == 0 else "MISMATCH"
+    cache_row = verify_exact(db, table)  # exact Oracle source -> cache (or keeps prior, stale)
+    verdict = source_verdict(cache_row, target_rows)
+    src = cache_row.source_row_count if (cache_row and cache_row.status == "ok") else None
+    missed = (src - target_rows) if (src is not None and target_rows is not None) else None
 
-    if last is not None:
+    # Record the recon result on the last run ONLY when official (exact MATCH/MISMATCH).
+    if last is not None and verdict in {"MATCH", "MISMATCH"}:
         last.target_row_count = target_rows
+        last.source_row_count = src
         last.validation_status = verdict
         db.add(last)
         db.add(MigrationValidation(
             migration_run_id=last.id,
             check_name="verify_target_row_count",
-            source_value=str(source_rows) if source_rows is not None else None,
+            source_value=str(src) if src is not None else None,
             target_value=str(target_rows) if target_rows is not None else None,
-            status="pass" if verdict == "MATCH" else "fail" if verdict == "MISMATCH" else "warning",
-            message=f"On-demand verify: target={target_rows}, source={source_rows}, missed={missed}",
+            status="pass" if verdict == "MATCH" else "fail",
+            message=f"On-demand exact verify: target={target_rows}, source={src}, missed={missed}",
         ))
         db.commit()
 
     return {
         "table": table.table,
         "target_table": table.target_table,
-        "source_rows": source_rows,
         "target_rows": target_rows,
+        "source_count": src,
+        "source_count_mode": cache_row.count_mode if cache_row else None,
+        "source_stale": (cache_row.status != "ok") if cache_row else True,
         "missed": missed,
-        "validation_status": verdict,
-        "source_available": source_rows is not None,
+        "source_verdict": verdict,
+        "source_available": src is not None,
         "last_run_id": str(last.id) if last else None,
-        "message": "Source = last-run count; live Oracle count runs on .63.",
+        "message": "Exact Oracle source count runs on .63; off-Oracle it stays ESTIMATE/stale.",
     }
 
 

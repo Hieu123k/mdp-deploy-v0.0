@@ -22,6 +22,7 @@ from app.api.transactions import router as transactions_router
 from app.api.users import router as users_router
 from app.core.config import settings
 from app.db.session import SessionLocal
+from app.services.source_count_refresher import SourceCountRefresher
 from app.services.user_service import seed_default_admin
 
 
@@ -29,7 +30,16 @@ from app.services.user_service import seed_default_admin
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     with SessionLocal() as db:
         seed_default_admin(db)
-    yield
+    refresher = SourceCountRefresher()
+    try:
+        refresher.start()  # no-op unless ORA2PG_SOURCE_COUNT_ENABLED
+    except Exception:  # pragma: no cover - never block startup on the refresher
+        pass
+    app.state.source_count_refresher = refresher
+    try:
+        yield
+    finally:
+        await refresher.stop()
 
 
 app = FastAPI(

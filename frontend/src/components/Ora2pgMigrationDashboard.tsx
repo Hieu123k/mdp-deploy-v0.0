@@ -58,11 +58,28 @@ function validationTone(status?: string | null): BadgeTone {
       return "success";
     case "MISMATCH":
       return "danger";
-    case "PENDING":
-      return "warning";
+    case "ESTIMATE":
+      return "warning"; // estimate is NOT a (red) mismatch
     default:
-      return "neutral";
+      return "neutral"; // PENDING / unknown
   }
+}
+
+function verdictLabel(v?: string | null): string {
+  switch (v) {
+    case "ESTIMATE":
+      return "≈ ước tính";
+    case "PENDING":
+      return "chờ Verify";
+    default:
+      return v || "—";
+  }
+}
+
+function fmtClock(iso?: string | null): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
 
 export function Ora2pgMigrationDashboard() {
@@ -431,20 +448,33 @@ export function Ora2pgMigrationDashboard() {
                     {t.target_schema}.{t.target_table}
                   </TD>
                   <TD>{fmtInt(t.current_rows)}</TD>
-                  <TD>{fmtInt(t.last_source_rows)}</TD>
+                  {/* Source = cached Oracle count (estimate refreshed in background, or exact via Verify) */}
                   <TD
-                    className={
-                      t.last_missed && t.last_missed > 0 ? "font-semibold text-danger" : "text-neutral-500"
+                    title={
+                      t.source_count_at
+                        ? `as of ${fmtClock(t.source_count_at)} (${t.source_count_mode ?? "?"})${t.source_stale ? " — stale" : ""}`
+                        : "no source count yet (enable refresher on .63)"
                     }
                   >
-                    {fmtInt(t.last_missed)}
+                    {fmtInt(t.source_count)}
+                    {t.source_count != null && t.source_count_mode === "estimate" && (
+                      <span className="ml-1 text-xs text-warning" title="estimate (Oracle stats)">≈</span>
+                    )}
+                    {t.source_stale && t.source_count != null && (
+                      <span className="ml-1 text-xs text-neutral-400">stale</span>
+                    )}
+                  </TD>
+                  <TD
+                    className={
+                      t.source_verdict === "MISMATCH" && t.source_missed ? "font-semibold text-danger" : "text-neutral-500"
+                    }
+                  >
+                    {t.source_verdict === "ESTIMATE" ? "≈" : fmtInt(t.source_missed)}
                   </TD>
                   <TD className="text-neutral-500">{fmtDur(t.last_run_duration_sec)}</TD>
                   <TD>
-                    {t.last_validation_status ? (
-                      <Badge tone={validationTone(t.last_validation_status)}>
-                        {t.last_validation_status}
-                      </Badge>
+                    {t.source_verdict ? (
+                      <Badge tone={validationTone(t.source_verdict)}>{verdictLabel(t.source_verdict)}</Badge>
                     ) : (
                       <span className="text-neutral-400">—</span>
                     )}

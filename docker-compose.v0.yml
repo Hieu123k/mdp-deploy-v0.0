@@ -56,6 +56,9 @@ services:
       ORACLE_USER: ${ORACLE_USER:-}
       ORACLE_PWD: ${ORACLE_PWD:-}
       ORACLE_SCHEMA: ${ORACLE_SCHEMA:-SYSTEM}
+      # Source-count refresher (background estimate of Oracle source rows -> cache). Default OFF.
+      ORA2PG_SOURCE_COUNT_ENABLED: ${ORA2PG_SOURCE_COUNT_ENABLED:-false}
+      ORA2PG_SOURCE_COUNT_INTERVAL: ${ORA2PG_SOURCE_COUNT_INTERVAL:-300}
     volumes:
       # exec ora2pg in its container, and share the generated ora2pg.conf
       - /var/run/docker.sock:/var/run/docker.sock

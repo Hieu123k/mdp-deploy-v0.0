@@ -33,6 +33,12 @@ class Settings(BaseSettings):
     # Target schema in MDP's own postgres (design 1B: no separate DW, no FDW)
     ora2pg_target_schema: str = "mdp_staging"
 
+    # --- Source-count refresher (background estimate of Oracle source rows -> cache) ---
+    # Default OFF; only turned on where Oracle is reachable (.63). The periodic loop only ever
+    # does cheap ESTIMATE counts (Oracle stats); exact COUNT(*) runs on-demand via Verify.
+    ora2pg_source_count_enabled: bool = False
+    ora2pg_source_count_interval: int = 300  # seconds between estimate refreshes
+
     @model_validator(mode="after")
     def validate_production_settings(self) -> "Settings":
         if self.app_env != "production":

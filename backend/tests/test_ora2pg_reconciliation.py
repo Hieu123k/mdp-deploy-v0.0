@@ -127,7 +127,8 @@ def test_verify_endpoint_contract(client, auth_headers):
     assert res.status_code == 200
     body = res.json()
     assert body["table"] == "V2_PRO_F0911"
-    assert "validation_status" in body and "missed" in body and "source_available" in body
+    # verdict field renamed to source_verdict (exact-vs-estimate aware) in the source-count work
+    assert "source_verdict" in body and "missed" in body and "source_available" in body
 
 
 def test_verify_unknown_table_404(client, auth_headers):
