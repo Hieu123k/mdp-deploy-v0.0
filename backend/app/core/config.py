@@ -40,11 +40,12 @@ class Settings(BaseSettings):
     ora2pg_source_count_interval: int = 300  # seconds between estimate refreshes
 
     # --- Streaming (watermark-incremental sync: Oracle change -> upsert into Postgres) ---
-    # Default OFF (additive; only turned on where Oracle is reachable). The poll loop wakes every
-    # `streaming_interval` seconds (loop tick) and runs a cycle for each enabled streaming_config
-    # table that is due (now - last_run_at >= its poll_interval_sec). Each cycle pulls only the
-    # watermark range via ora2pg INSERT ON CONFLICT DO NOTHING (idempotent; never duplicates).
-    streaming_enabled: bool = False
+    # The poll loop ALWAYS runs (singleton); each `streaming_interval` tick it runs a cycle for
+    # every streaming_config table that is `enabled` AND due (now - last_run_at >= poll_interval_sec).
+    # Per-table `enabled` (toggled on the Settings UI) is the control: enabling a table is enough to
+    # start auto-migration — no env flip / restart. `streaming_enabled` is now only a MASTER
+    # kill-switch (default ON) for ops to globally pause; an idle loop (no enabled table) is near-free.
+    streaming_enabled: bool = True
     streaming_interval: int = 60  # seconds between loop ticks (per-table cadence = poll_interval_sec)
 
     @model_validator(mode="after")

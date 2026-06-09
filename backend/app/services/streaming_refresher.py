@@ -50,15 +50,19 @@ def _acquire_singleton() -> Any | None:
 
 
 async def _loop(stop_event: asyncio.Event) -> None:
-    _status.update(enabled=True, running=True)
+    _status.update(running=True)
     interval = max(15, int(settings.streaming_interval or 60))
     while not stop_event.is_set():
         try:
-            with SessionLocal() as db:
-                result = streaming_service.run_all_due(db)
-            _status.update(last_result=result)
-            if result.get("ran"):
-                logger.info("streaming poll cycle: %s", result)
+            # Master kill-switch (default ON): only skip work if ops explicitly disabled streaming.
+            # Otherwise the per-table `enabled` flag (run_all_due) is the sole control.
+            _status.update(enabled=bool(settings.streaming_enabled))
+            if settings.streaming_enabled:
+                with SessionLocal() as db:
+                    result = streaming_service.run_all_due(db)
+                _status.update(last_result=result)
+                if result.get("ran"):
+                    logger.info("streaming poll cycle: %s", result)
         except Exception as exc:  # pragma: no cover - the cycle must never kill the task
             _status.update(last_result={"error": str(exc)})
             logger.warning("streaming poll cycle failed: %s", exc)
@@ -76,8 +80,10 @@ class StreamingRefresher:
         self._lock_conn: Any | None = None
 
     def start(self) -> bool:
-        if not settings.streaming_enabled:
-            return False
+        # The loop ALWAYS starts (singleton via advisory lock); the per-table `enabled` flag is the
+        # control — toggling a table on the Settings UI is enough to start auto-migration, no env
+        # flip / restart needed. `STREAMING_ENABLED` is now only a master kill-switch (default ON,
+        # re-checked each tick) for ops to globally pause; an idle loop (no enabled table) is near-free.
         lock = _acquire_singleton()
         if lock == "taken":
             logger.info("streaming refresher not started (singleton lock held elsewhere)")
