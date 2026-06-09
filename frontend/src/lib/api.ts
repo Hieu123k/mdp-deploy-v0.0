@@ -880,3 +880,65 @@ export function ora2pgStreamRun(
   })();
   return () => ctrl.abort();
 }
+
+// --- Streaming (watermark-incremental) ------------------------------------------------------
+
+export type StreamingTable = {
+  source_view: string;
+  target_table: string;
+  label: string;
+  enabled: boolean;
+  ts_col: string | null;
+  ts_time_col: string | null;
+  granularity: string;
+  poll_interval_sec: number;
+  lookback_days: number;
+  primary_key_columns: string[] | null;
+  last_watermark: string | null;
+  last_watermark_time: string | null;
+  last_run_at: string | null;
+  last_rows_added: number | null;
+  last_status: string | null;
+  last_error: string | null;
+  has_ts_time_col: boolean;
+};
+
+export type StreamingStatus = {
+  loop: { enabled: boolean; running: boolean; last_cycle: unknown; last_result: unknown };
+  tables: StreamingTable[];
+};
+
+export type StreamingConfigUpdate = Partial<{
+  enabled: boolean;
+  ts_col: string;
+  ts_time_col: string;
+  granularity: string;
+  poll_interval_sec: number;
+  lookback_days: number;
+  primary_key_columns: string[];
+}>;
+
+export type StreamingRunResult = {
+  ok: boolean;
+  table: string;
+  status: string;
+  predicate: string | null;
+  rows_added: number | null;
+  cursor: string | null;
+  cursor_time: string | null;
+  error: string | null;
+  rows_before?: number | null;
+  rows_after?: number | null;
+  exit_code?: number | null;
+};
+
+export const streamingStatus = () => req<StreamingStatus>("/streaming/status");
+
+export const streamingUpdateConfig = (table: string, body: StreamingConfigUpdate) =>
+  req<StreamingTable>(`/streaming/config/${encodeURIComponent(table)}`, {
+    method: "PUT",
+    body: JSON.stringify(body),
+  });
+
+export const streamingRunOnce = (table: string) =>
+  req<StreamingRunResult>(`/streaming/run-once/${encodeURIComponent(table)}`, { method: "POST" });

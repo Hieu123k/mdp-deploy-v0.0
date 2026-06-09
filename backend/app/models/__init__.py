@@ -3,6 +3,7 @@ from app.models.connection import Connection
 from app.models.data_model import DataModel
 from app.models.migration import MigrationJob, MigrationRun, MigrationValidation
 from app.models.source_count import Ora2pgSourceCount
+from app.models.streaming_config import StreamingConfig
 from app.models.transaction import Transaction
 from app.models.user import User
 
@@ -14,6 +15,7 @@ __all__ = [
     "MigrationRun",
     "MigrationValidation",
     "Ora2pgSourceCount",
+    "StreamingConfig",
     "Transaction",
     "User",
 ]

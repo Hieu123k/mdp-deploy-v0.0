@@ -39,6 +39,14 @@ class Settings(BaseSettings):
     ora2pg_source_count_enabled: bool = False
     ora2pg_source_count_interval: int = 300  # seconds between estimate refreshes
 
+    # --- Streaming (watermark-incremental sync: Oracle change -> upsert into Postgres) ---
+    # Default OFF (additive; only turned on where Oracle is reachable). The poll loop wakes every
+    # `streaming_interval` seconds (loop tick) and runs a cycle for each enabled streaming_config
+    # table that is due (now - last_run_at >= its poll_interval_sec). Each cycle pulls only the
+    # watermark range via ora2pg INSERT ON CONFLICT DO NOTHING (idempotent; never duplicates).
+    streaming_enabled: bool = False
+    streaming_interval: int = 60  # seconds between loop ticks (per-table cadence = poll_interval_sec)
+
     @model_validator(mode="after")
     def validate_production_settings(self) -> "Settings":
         if self.app_env != "production":

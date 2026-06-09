@@ -17,6 +17,7 @@ import os
 import re
 import threading
 import time
+import uuid
 from datetime import datetime, timezone
 from typing import Any
 
@@ -599,6 +600,134 @@ def start_repair(
             target=_repair_worker, args=(run_id, table, watermark_col, cutoff), daemon=True
         )
     thread.start()
+
+
+def _drop_progress(run_id: str) -> None:
+    with _LOCK:
+        _PROGRESS.pop(run_id, None)
+
+
+def target_exists(target_table: str) -> bool:
+    """True if the target staging table exists (streaming requires an initial full load first)."""
+    try:
+        with engine.connect() as conn:
+            reg = conn.execute(
+                text("SELECT to_regclass(:q)"),
+                {"q": f'"{settings.ora2pg_target_schema}"."{target_table}"'},
+            ).scalar()
+        return reg is not None
+    except Exception:
+        return False
+
+
+def target_max_watermark(
+    target_table: str, ts_col: str, ts_time_col: str | None = None
+) -> tuple[str | None, str | None]:
+    """Return (max ``ts_col``, paired ``ts_time_col``) currently in the target staging table as
+    strings. Used to (a) initialise the streaming cursor from the loaded baseline and (b) advance
+    it after each pull. Returns (None, None) when the table is empty/unavailable. Column names are
+    catalog/discovery values (never user input)."""
+    schema = settings.ora2pg_target_schema
+    tcol = ts_col.lower()
+    try:
+        with SessionLocal() as db:
+            raw = db.connection().connection
+            with raw.cursor() as cur:
+                if ts_time_col:
+                    ttcol = ts_time_col.lower()
+                    cur.execute(
+                        f'SELECT "{tcol}", "{ttcol}" FROM "{schema}"."{target_table}" '
+                        f'ORDER BY "{tcol}" DESC NULLS LAST, "{ttcol}" DESC NULLS LAST LIMIT 1'
+                    )
+                    row = cur.fetchone()
+                    if not row or row[0] is None:
+                        return None, None
+                    return str(row[0]), (None if row[1] is None else str(row[1]))
+                cur.execute(f'SELECT MAX("{tcol}") FROM "{schema}"."{target_table}"')
+                row = cur.fetchone()
+                if not row or row[0] is None:
+                    return None, None
+                return str(row[0]), None
+    except Exception:
+        return None, None
+
+
+def streaming_pull_once(
+    table: Ora2pgTable, *, where_clause: str, pk_columns: list[str]
+) -> dict[str, Any]:
+    """One streaming cycle: pull only the source rows matching ``where_clause`` (an ora2pg WHERE
+    predicate on the view, e.g. ``V2_PRO_F0911[GLUPMJ >= 124001]``) and upsert them via ``-t
+    INSERT`` + ``INSERT ON CONFLICT DO NOTHING`` against the target PK — so a re-pulled (``>=`` +
+    lookback) row that already exists is skipped (idempotent, never duplicated).
+
+    Synchronous; reuses the repair primitives (build_ora2pg_conf / _copy_stream / audit cols /
+    unique index). The target table must already exist (do an initial full load first). Returns
+    ``{ok, rows_before, rows_after, rows_added, exit_code, error, log}`` and never raises — a
+    failed cycle must not kill the poll loop."""
+    result: dict[str, Any] = {
+        "ok": False, "rows_before": None, "rows_after": None, "rows_added": None,
+        "exit_code": None, "error": None, "log": [],
+    }
+    if not target_exists(table.target_table):
+        result["error"] = (
+            f"target {settings.ora2pg_target_schema}.{table.target_table} does not exist — "
+            "run an initial full load before streaming"
+        )
+        return result
+    if not pk_columns:
+        result["error"] = "no primary_key_columns — run discover-keys first (ON CONFLICT needs a unique key)"
+        return result
+
+    run_id = str(uuid.uuid4())
+    log_tail: list[str] = []
+    try:
+        try:
+            import docker  # noqa: F401  (lazy; surfaces a clear error if the SDK is missing)
+        except Exception as exc:  # pragma: no cover
+            result["error"] = f"docker SDK unavailable: {exc}"
+            return result
+
+        conf = build_ora2pg_conf(
+            table, truncate=False, where_clause=where_clause, insert_on_conflict=True
+        )
+        _write_conf(conf)
+        log_tail.append("Generated /config/ora2pg.conf (streaming):\n" + redact_conf(conf))
+
+        try:
+            api, container = _open_ora2pg()
+        except Exception as exc:
+            result["error"] = f"cannot reach ora2pg container '{settings.ora2pg_container}': {exc}"
+            result["log"] = log_tail
+            return result
+
+        # Tag streamed rows with this cycle id, and (re)ensure the unique PK index ON CONFLICT needs.
+        _ensure_audit_cols(settings.ora2pg_target_schema, table.target_table, run_id)
+        _ensure_unique_index(settings.ora2pg_target_schema, table.target_table, pk_columns)
+
+        rows_before = _count_target(table.target_table)
+        started = time.monotonic()
+        exit_code, err = _copy_stream(api, container.id, run_id, started, log_tail, action="INSERT")
+        rows_after = _count_target(table.target_table)
+
+        result.update(
+            rows_before=rows_before, rows_after=rows_after, exit_code=exit_code, log=log_tail[-40:]
+        )
+        if rows_before is not None and rows_after is not None:
+            result["rows_added"] = rows_after - rows_before
+        if err:
+            result["error"] = err
+            return result
+        if exit_code not in (0, None):
+            result["error"] = f"ora2pg streaming INSERT failed (exit {exit_code})"
+            return result
+        result["ok"] = True
+        return result
+    except Exception as exc:  # pragma: no cover - the cycle must never crash the poll loop
+        result["error"] = f"streaming cycle error: {exc}"
+        result["log"] = log_tail[-40:]
+        return result
+    finally:
+        _drop_progress(run_id)
 
 
 def _map_pk_to_view(index_cols: dict[str, list[tuple[int, str]]], view_cols: set[str]) -> tuple[list[str] | None, list[str]]:

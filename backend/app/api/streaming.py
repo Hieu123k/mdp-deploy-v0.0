@@ -1,0 +1,116 @@
+"""Streaming (watermark-incremental) control API — additive, auth-gated.
+
+Minimal REST surface to configure, inspect and manually trigger watermark streaming per table.
+A polished Settings UI is a later prompt; this is enough to drive and verify the feature.
+"""
+from __future__ import annotations
+
+from typing import Annotated, Any
+
+from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel
+from sqlalchemy.orm import Session
+
+from app.api.deps import get_current_user
+from app.core.ora2pg_catalog import get_table
+from app.db.session import get_db
+from app.services import streaming_refresher, streaming_service
+
+router = APIRouter(
+    prefix="/streaming",
+    tags=["streaming"],
+    dependencies=[Depends(get_current_user)],
+)
+
+
+class StreamingConfigUpdate(BaseModel):
+    enabled: bool | None = None
+    ts_col: str | None = None
+    ts_time_col: str | None = None
+    granularity: str | None = None
+    poll_interval_sec: int | None = None
+    lookback_days: int | None = None
+    primary_key_columns: list[str] | None = None
+
+
+@router.get("/config")
+def list_config(db: Annotated[Session, Depends(get_db)]) -> dict[str, Any]:
+    return {"tables": streaming_service.list_config_views(db)}
+
+
+@router.get("/config/{table_name}")
+def get_config(table_name: str, db: Annotated[Session, Depends(get_db)]) -> dict[str, Any]:
+    table = get_table(table_name)
+    if table is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown table")
+    cfg = streaming_service.get_config(db, table.table)
+    return streaming_service.config_view(cfg, table)
+
+
+@router.put("/config/{table_name}")
+def put_config(
+    table_name: str,
+    payload: StreamingConfigUpdate,
+    db: Annotated[Session, Depends(get_db)],
+) -> dict[str, Any]:
+    table = get_table(table_name)
+    if table is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown table")
+
+    fields = payload.model_dump(exclude_none=True)
+    if "granularity" in fields and fields["granularity"] not in streaming_service.GRANULARITIES:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="granularity must be day|timestamp")
+
+    # timestamp granularity needs a real time-of-day column — require it to be configured (in this
+    # request or already saved) AND confirmed present in the view.
+    if fields.get("granularity") == "timestamp":
+        cfg_existing = streaming_service.get_config(db, table.table)
+        ts_time = fields.get("ts_time_col") or (cfg_existing.ts_time_col if cfg_existing else None)
+        if not ts_time:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="granularity=timestamp requires ts_time_col (the UPMT-style time column)",
+            )
+        cols, err = streaming_service.probe_view_columns(table)
+        if cols and ts_time.upper() not in {c.upper() for c in cols}:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"ts_time_col '{ts_time}' not found in view {table.table} (columns probed: {len(cols)})",
+            )
+
+    cfg = streaming_service.upsert_config(db, table.table, **fields)
+    return streaming_service.config_view(cfg, table)
+
+
+@router.get("/status")
+def streaming_status(db: Annotated[Session, Depends(get_db)]) -> dict[str, Any]:
+    return {
+        "loop": streaming_refresher.get_status(),
+        "tables": streaming_service.list_config_views(db),
+    }
+
+
+@router.get("/probe/{table_name}")
+def probe_columns(table_name: str, db: Annotated[Session, Depends(get_db)]) -> dict[str, Any]:
+    """Probe the view's columns (read-only) — used to auto-detect a UPMT-style time column."""
+    table = get_table(table_name)
+    if table is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown table")
+    cols, err = streaming_service.probe_view_columns(table)
+    upmt = [c for c in cols if c.upper().endswith("UPMT") or c.upper().endswith("UPMT0")]
+    return {"table": table.table, "columns": cols, "upmt_candidates": upmt, "error": err}
+
+
+@router.post("/run-once/{table_name}")
+def run_once(
+    table_name: str,
+    db: Annotated[Session, Depends(get_db)],
+) -> dict[str, Any]:
+    """Run one streaming cycle synchronously (ignores `enabled`) — for manual testing."""
+    table = get_table(table_name)
+    if table is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown table")
+    cfg = streaming_service.get_config(db, table.table)
+    if cfg is None:
+        cfg = streaming_service.upsert_config(db, table.table)
+    return streaming_service.run_cycle(db, cfg, force=True)

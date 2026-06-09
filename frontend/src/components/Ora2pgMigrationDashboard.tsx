@@ -6,6 +6,7 @@ import { Badge, type BadgeTone } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card, CardBody, CardHeader } from "@/components/ui/Card";
 import { Input } from "@/components/ui/Input";
+import { StreamingControl } from "@/components/StreamingControl";
 import { Select } from "@/components/ui/Select";
 import { Table, TBody, TD, TH, THead, TR } from "@/components/ui/Table";
 import {
@@ -285,6 +286,7 @@ export function Ora2pgMigrationDashboard() {
       : null;
 
   return (
+    <div className="space-y-4">
     <Card className="mb-4 border-brand/30">
       <CardHeader
         title={
@@ -545,6 +547,8 @@ export function Ora2pgMigrationDashboard() {
         </div>
       </CardBody>
     </Card>
+      <StreamingControl />
+    </div>
   );
 }
 

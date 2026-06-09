@@ -1,0 +1,114 @@
+# tipa-vm DEV instance `mdp2` — streaming-watermark feature build (feature/streaming-watermark),
+# wired to the local `ora-free` Oracle sandbox. Plain HTTP on :8456, coexists with hybrid V1.0.
+#   docker compose -f docker-compose.mdp2.yml --env-file .env.mdp2 -p mdp2 up -d --build
+# After `up`, connect ora-free to this project's network so ora2pg can reach Oracle by name:
+#   docker network connect mdp2_default ora-free
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  ora2pg:
+    image: ${ORA2PG_IMAGE:-georgmoser/ora2pg:24.3}
+    container_name: ${ORA2PG_CONTAINER:-mdp2_ora2pg}
+    restart: unless-stopped
+    volumes:
+      - ora2pg_config:/config
+    command: ["tail", "-f", "/dev/null"]
+
+  backend:
+    build:
+      context: ./backend
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      DATABASE_URL: ${DATABASE_URL}
+      CORS_ORIGINS: ${CORS_ORIGINS}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      CONNECTION_SECRET_KEY: ${CONNECTION_SECRET_KEY}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      ORA2PG_CONTAINER: ${ORA2PG_CONTAINER:-mdp2_ora2pg}
+      ORA2PG_SHARED_DIR: /opt/ora2pg
+      # Real Oracle: the local ora-free sandbox (reachable once ora-free joins mdp2_default).
+      ORACLE_HOST: ${ORACLE_HOST}
+      ORACLE_PORT: ${ORACLE_PORT:-1521}
+      ORACLE_SERVICE_NAME: ${ORACLE_SERVICE_NAME}
+      ORACLE_SID: ${ORACLE_SID}
+      ORACLE_USER: ${ORACLE_USER}
+      ORACLE_PWD: ${ORACLE_PWD}
+      ORACLE_SCHEMA: ${ORACLE_SCHEMA}
+      # Source-count refresher (estimate) — default OFF (this feature build is about streaming).
+      ORA2PG_SOURCE_COUNT_ENABLED: ${ORA2PG_SOURCE_COUNT_ENABLED:-false}
+      ORA2PG_SOURCE_COUNT_INTERVAL: ${ORA2PG_SOURCE_COUNT_INTERVAL:-300}
+      # Streaming (watermark-incremental) poll loop — default OFF (3 hard gates: ENV, per-table
+      # enabled flag, advisory-lock singleton). run-once works regardless for manual testing.
+      STREAMING_ENABLED: ${STREAMING_ENABLED:-false}
+      STREAMING_INTERVAL: ${STREAMING_INTERVAL:-60}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ora2pg_config:/opt/ora2pg
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5)\"",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_URL: ""
+    depends_on:
+      backend:
+        condition: service_started
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "node -e \"fetch('http://localhost:3000').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))\"",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  reverse-proxy:
+    image: caddy:2
+    ports:
+      - "${MDP_PORT:-8456}:8456"
+    volumes:
+      - ./deploy/Caddyfile.mdp2:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      backend:
+        condition: service_started
+      frontend:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  caddy_data:
+  caddy_config:
+  ora2pg_config:

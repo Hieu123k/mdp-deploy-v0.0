@@ -44,3 +44,6 @@ mdp65_admin.txt
 # v0.0 dashboard runtime artifacts
 .env.sandbox
 .env.v0
+
+# tipa-vm mdp2 streaming feature build runtime secrets
+.env.mdp2

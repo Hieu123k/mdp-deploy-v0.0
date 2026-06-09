@@ -1,0 +1,18 @@
+# tipa-vm DEV instance `mdp2` — plain HTTP on :8456 (coexists with hybrid V1.0 + ora-free).
+# Streaming-watermark feature build, points at the local `ora-free` Oracle sandbox.
+:8456 {
+	encode gzip
+
+	handle_path /api/* {
+		reverse_proxy backend:8000
+	}
+	handle /docs* {
+		reverse_proxy backend:8000
+	}
+	handle /openapi.json {
+		reverse_proxy backend:8000
+	}
+	handle {
+		reverse_proxy frontend:3000
+	}
+}
