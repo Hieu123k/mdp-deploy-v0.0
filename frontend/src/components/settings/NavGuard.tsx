@@ -31,9 +31,19 @@ export function NavGuard({ children }: { children: React.ReactNode }) {
     if (RELOCATED[pathname]) return RELOCATED[pathname];
     const item = NAV_ITEMS.find((i) => pathname === i.href || pathname.startsWith(i.href + "/"));
     if (!item) return null;
-    if (item.adminOnly && user.role !== "admin") return "/";
-    if (prefs.nav_config?.[item.href]?.visible === false) return "/";
-    return null;
+    const blocked =
+      (item.adminOnly && user.role !== "admin") || prefs.nav_config?.[item.href]?.visible === false;
+    if (!blocked) return null;
+    // Redirect to a route that is actually visible for this user — never back to the blocked route
+    // itself (a no-op redirect leaving a blank screen, e.g. when "/" is hidden).
+    const firstVisible = NAV_ITEMS.find(
+      (i) =>
+        i.href !== item.href &&
+        (!i.adminOnly || user.role === "admin") &&
+        prefs.nav_config?.[i.href]?.visible !== false,
+    );
+    const dest = firstVisible?.href ?? "/settings";
+    return dest === pathname ? "/settings" : dest;
   }, [pathname, prefs, loaded, user]);
 
   useEffect(() => {

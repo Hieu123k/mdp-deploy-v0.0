@@ -47,9 +47,20 @@ export default function SettingsPage() {
   const isAdmin = user?.role === "admin";
   const [section, setSection] = useState<Section>("profile");
 
-  // default landing: admins start on "access", others on "profile"
+  // landing sub-tab: ?tab= deep-link (e.g. avatar → /settings?tab=profile), else admins start on
+  // "access", others on "profile". window.location avoids useSearchParams' Suspense requirement.
   useEffect(() => {
-    setSection(isAdmin ? "access" : "profile");
+    let tab: string | null = null;
+    try {
+      tab = new URLSearchParams(window.location.search).get("tab");
+    } catch {
+      /* ignore */
+    }
+    if (tab && ["access", "users", "profile", "design"].includes(tab)) {
+      setSection(tab as Section);
+    } else {
+      setSection(isAdmin ? "access" : "profile");
+    }
   }, [isAdmin]);
 
   // ---- Tabs & access (per user) — admin ----

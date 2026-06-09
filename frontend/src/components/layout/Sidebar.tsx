@@ -84,7 +84,7 @@ export function Sidebar() {
         {user ? (
           <div className="flex items-center gap-2">
             <Link
-              href="/profile"
+              href="/settings?tab=profile"
               className="flex min-w-0 flex-1 items-center gap-2 rounded-md px-2 py-1.5 hover:bg-neutral-100 dark:hover:bg-neutral-800"
             >
               <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-brand text-xs font-bold text-white">

@@ -10,6 +10,7 @@ import asyncio
 import csv
 import io
 import json
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import Annotated, Any
@@ -653,22 +654,63 @@ def _target_columns(target_table: str) -> set[str]:
         return set()
 
 
+# Strict identifier allowlist for PK column names (defence against DDL injection — these names are
+# interpolated into CREATE UNIQUE INDEX). PK columns are lower-cased first, so a-z/0-9/_ only.
+_PK_COL_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+
+
+def _validate_pk_identifiers(pk_columns: list[str]) -> None:
+    bad = [c for c in pk_columns if not _PK_COL_RE.match(c)]
+    if bad:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid column name(s): {', '.join(bad)} — use lower-case letters, digits, underscore",
+        )
+
+
+def _pk_has_duplicates(target_table: str, pk_columns: list[str]) -> bool:
+    """True if the proposed PK is NOT unique in the migrated target (so a UNIQUE index would fail).
+    Columns are pre-validated identifiers. Returns False if undeterminable (the index build is the
+    final gate)."""
+    schema = settings.ora2pg_target_schema
+    cols = ", ".join(f'"{c}"' for c in pk_columns)
+    try:
+        with engine.connect() as conn:
+            raw = conn.connection
+            with raw.cursor() as cur:
+                cur.execute(
+                    f'SELECT 1 FROM "{schema}"."{target_table}" GROUP BY {cols} HAVING count(*) > 1 LIMIT 1'
+                )
+                return cur.fetchone() is not None
+    except Exception:
+        return False
+
+
 def _rebuild_unique_index(target_table: str, pk_columns: list[str]) -> tuple[bool, str | None]:
-    """DROP the target's PK unique index and re-CREATE it on ``pk_columns`` so a changed PK takes
-    effect. Returns (ok, error). A non-unique PK makes CREATE UNIQUE INDEX fail → (False, message)
-    WITHOUT raising (the caller surfaces it; the streaming cycle for that table then reports
-    status=error rather than crashing)."""
+    """Re-create the target's PK unique index on ``pk_columns`` ATOMICALLY: build a NEW unique index
+    under a temp name first, and only if that succeeds drop the old + rename. So a non-unique PK
+    (CREATE fails) leaves the prior index intact rather than the table index-less. Columns are
+    pre-validated identifiers. Returns (ok, error)."""
     schema = settings.ora2pg_target_schema
     idx = f"ux_{target_table}_pk"[:63]
-    cols = ", ".join(f'"{c.lower()}"' for c in pk_columns)
+    tmp = f"ux_{target_table}_pk_new"[:63]
+    cols = ", ".join(f'"{c}"' for c in pk_columns)
     try:
         with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
             raw = conn.connection
             with raw.cursor() as cur:
+                cur.execute(f'DROP INDEX IF EXISTS "{schema}"."{tmp}"')
+                cur.execute(f'CREATE UNIQUE INDEX "{tmp}" ON "{schema}"."{target_table}" ({cols})')
                 cur.execute(f'DROP INDEX IF EXISTS "{schema}"."{idx}"')
-                cur.execute(f'CREATE UNIQUE INDEX "{idx}" ON "{schema}"."{target_table}" ({cols})')
+                cur.execute(f'ALTER INDEX "{schema}"."{tmp}" RENAME TO "{idx}"')
         return True, None
     except Exception as exc:
+        try:  # best-effort cleanup of the temp index; the prior ux_<t>_pk is untouched on failure
+            with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+                with conn.connection.cursor() as cur:
+                    cur.execute(f'DROP INDEX IF EXISTS "{schema}"."{tmp}"')
+        except Exception:
+            pass
         return False, str(exc).splitlines()[0][:300]
 
 
@@ -693,6 +735,8 @@ def set_primary_key(
     pk = [c.strip().lower() for c in (payload.pk_columns or []) if c and c.strip()]
     if not pk:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="pk_columns must not be empty")
+    # ALWAYS validate identifiers before they can be persisted or reach any DDL (no SQL injection).
+    _validate_pk_identifiers(pk)
 
     target_cols = _target_columns(table.target_table)
     target_exists = bool(target_cols)
@@ -703,6 +747,13 @@ def set_primary_key(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Column(s) not in {table.target_table}: {', '.join(unknown)}",
             )
+        # Reject a non-unique PK up-front (clear error, no crash) so we never persist a PK whose
+        # UNIQUE index can't be built and never leave the table without an index.
+        if _pk_has_duplicates(table.target_table, pk):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"PK {pk} is NOT unique in {table.target_table} — pick a unique key (single or composite).",
+            )
 
     # Persist canonical PK + sync streaming.
     job = _get_or_create_job(db, table)
@@ -711,7 +762,7 @@ def set_primary_key(
     _sync_streaming_pk(db, table.table, pk)
     db.commit()
 
-    # Rebuild the unique index (only possible once the target exists / is migrated).
+    # Rebuild the unique index atomically (only possible once the target exists / is migrated).
     index_rebuilt, index_error = (False, None)
     if target_exists:
         index_rebuilt, index_error = _rebuild_unique_index(table.target_table, pk)

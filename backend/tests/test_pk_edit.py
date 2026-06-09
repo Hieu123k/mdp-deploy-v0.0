@@ -47,6 +47,15 @@ def test_set_pk_empty_400(client: TestClient, auth_headers: dict[str, str]) -> N
     assert r.status_code == 400
 
 
+def test_set_pk_rejects_injection_identifier(client: TestClient, auth_headers: dict[str, str]) -> None:
+    # DDL-injection / bad identifier must be rejected up-front (never persisted, never reaches DDL).
+    for bad in ['gldoc") ; DROP TABLE x; --', "col with space", "weird-name", "1col", "Col;"]:
+        r = client.put(
+            "/ora2pg/tables/V2_PRO_F0911/primary-key", headers=auth_headers, json={"pk_columns": [bad]}
+        )
+        assert r.status_code == 400, f"expected 400 for {bad!r}, got {r.status_code}"
+
+
 def test_set_pk_unknown_table_404(client: TestClient, auth_headers: dict[str, str]) -> None:
     r = client.put("/ora2pg/tables/NOPE/primary-key", headers=auth_headers, json={"pk_columns": ["x"]})
     assert r.status_code == 404
