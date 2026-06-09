@@ -722,6 +722,8 @@ export type Ora2pgTable = {
   last_validation_status: string | null;
   last_run_duration_sec: number | null;
   pk_columns: string[] | null;
+  pk_source: string | null; // reference | manual | scanned
+  pk_warning: string | null; // name-mismatch / surrogate UKID / column not in view
   // Source-count cache (background estimate + on-demand exact); populated on page load.
   source_count: number | null;
   source_count_mode: string | null; // estimate | exact

@@ -658,7 +658,17 @@ export function Ora2pgMigrationDashboard() {
                             {t.pk_columns.join(", ")}
                           </span>
                         ) : (
-                          <Badge tone="neutral">null · not scanned</Badge>
+                          <span className="text-neutral-400">—</span>
+                        )}
+                        {t.pk_source && (
+                          <Badge tone={t.pk_source === "manual" ? "info" : t.pk_source === "scanned" ? "success" : "neutral"}>
+                            {t.pk_source}
+                          </Badge>
+                        )}
+                        {t.pk_warning && (
+                          <span className="cursor-help text-warning" title={t.pk_warning}>
+                            ⚠ verify
+                          </span>
                         )}
                         <Button
                           size="sm"

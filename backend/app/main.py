@@ -31,6 +31,14 @@ from app.services.user_service import seed_default_admin
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     with SessionLocal() as db:
         seed_default_admin(db)
+        try:
+            # Seed PK defaults from the public JDE reference doc (idempotent; never overrides a
+            # manual PK). Auto-scan is optional — the dashboard runs on reference+manual alone.
+            from app.services.pk_reference_service import seed_reference_primary_keys
+
+            seed_reference_primary_keys(db)
+        except Exception:  # pragma: no cover - never block startup on the PK seed
+            pass
     refresher = SourceCountRefresher()
     try:
         refresher.start()  # no-op unless ORA2PG_SOURCE_COUNT_ENABLED

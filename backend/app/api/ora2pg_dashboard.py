@@ -194,14 +194,47 @@ def dashboard_info() -> dict[str, Any]:
     }
 
 
+def _all_target_columns(db: Session) -> dict[str, set[str]]:
+    """{target_table (lower): {columns (lower)}} for mdp_staging — one query, for PK warnings."""
+    out: dict[str, set[str]] = {}
+    try:
+        rows = db.execute(
+            text("SELECT table_name, column_name FROM information_schema.columns WHERE table_schema = :s"),
+            {"s": settings.ora2pg_target_schema},
+        ).fetchall()
+        for tn, cn in rows:
+            out.setdefault(str(tn).lower(), set()).add(str(cn).lower())
+    except Exception:
+        pass
+    return out
+
+
+def _pk_status(job: "MigrationJob | None", pk_columns, target_cols: set[str] | None) -> dict[str, Any]:
+    """Resolve the PK source (reference|manual|scanned) + any warnings for the dashboard."""
+    cfg = (job.config or {}) if job else {}
+    source = cfg.get("pk_source") or ("reference" if pk_columns else None)
+    warnings: list[str] = []
+    if cfg.get("pk_name_match") is False:
+        warnings.append("table name differs from JDE vanilla — verify PK applies")
+    if cfg.get("pk_type") == "surrogate":
+        warnings.append("PK is a surrogate key (UKID) — verify it suits upsert")
+    if pk_columns and target_cols:  # only when the target is migrated
+        missing = [c for c in pk_columns if c not in target_cols]
+        if missing:
+            warnings.append(f"PK column(s) not in view: {', '.join(missing)}")
+    return {"pk_source": source, "pk_warning": "; ".join(warnings) if warnings else None}
+
+
 @router.get("/tables")
 def list_tables(db: Annotated[Session, Depends(get_db)]) -> dict[str, Any]:
     items = []
     source_cache = get_all_source_counts(db)  # read cache once; NO Oracle call at load time
+    target_cols_map = _all_target_columns(db)  # one query for PK missing-column warnings
     for t in MIGRATABLE_TABLES:
         job = db.scalar(select(MigrationJob).where(MigrationJob.name == _job_name(t.target_table)))
         last = _latest_run(db, job.id) if job else None
         current_rows = _count_table(db, t.target_table)
+        pk = job.primary_key_columns if job else None
         items.append({
             "table": t.table,
             "ts_col": t.ts_col,
@@ -214,7 +247,8 @@ def list_tables(db: Annotated[Session, Depends(get_db)]) -> dict[str, Any]:
             "last_run_id": str(last.id) if last else None,
             "last_run_status": last.status if last else None,
             "last_run_at": last.started_at.isoformat() if last and last.started_at else None,
-            "pk_columns": job.primary_key_columns if job else None,
+            "pk_columns": pk,
+            **_pk_status(job, pk, target_cols_map.get(t.target_table.lower())),
             **_recon_fields(last),
             **_source_count_fields(source_cache.get(t.table.upper()), current_rows),
         })
@@ -613,6 +647,7 @@ def discover_keys(
                 continue
             job = _get_or_create_job(db, t)
             job.primary_key_columns = r["pk_columns"]
+            job.config = {**(job.config or {}), "pk_source": "scanned"}
             db.add(job)
             _sync_streaming_pk(db, t.table, r["pk_columns"])
             persisted += 1
@@ -755,9 +790,10 @@ def set_primary_key(
                 detail=f"PK {pk} is NOT unique in {table.target_table} — pick a unique key (single or composite).",
             )
 
-    # Persist canonical PK + sync streaming.
+    # Persist canonical PK (pk_source=manual — overrides the reference default) + sync streaming.
     job = _get_or_create_job(db, table)
     job.primary_key_columns = pk
+    job.config = {**(job.config or {}), "pk_source": "manual"}
     db.add(job)
     _sync_streaming_pk(db, table.table, pk)
     db.commit()

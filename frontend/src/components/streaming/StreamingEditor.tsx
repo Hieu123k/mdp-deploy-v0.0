@@ -18,6 +18,15 @@ import {
 
 type StreamDraft = { enabled: boolean; granularity: string; poll_interval_sec: number; lookback_days: number };
 
+/** Format an ISO timestamp as a readable local datetime, e.g. "2026-06-09 11:48:51". */
+function fmtRunAt(iso?: string | null): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
 /** Streaming (watermark-incremental) per-table editor: enable → auto-migrates; "Run every (s)" is
  * the single cadence (min 2s). Edits go to a local draft until Apply. Shows cursor / status /
  * last_error. Used by the /streaming tab (relocated out of Settings). */
@@ -131,12 +140,13 @@ export function StreamingEditor() {
             <Table>
               <THead>
                 <TR>
-                  <TH>Table</TH>
                   <TH>Enabled</TH>
+                  <TH>Table</TH>
                   <TH>Granularity</TH>
                   <TH>Run every (s)</TH>
                   <TH>Lookback (d)</TH>
                   <TH>Cursor / status</TH>
+                  <TH>Last run</TH>
                   <TH> </TH>
                 </TR>
               </THead>
@@ -146,17 +156,18 @@ export function StreamingEditor() {
                   const dirty = isDirty(t);
                   return (
                     <TR key={t.source_view}>
-                      <TD className="font-medium">
-                        {t.source_view}
-                        {dirty ? <span className="ml-1.5 text-xs text-warning">unsaved</span> : null}
-                      </TD>
                       <TD>
                         <input
                           type="checkbox"
+                          aria-label={`Enable ${t.source_view}`}
                           checked={d.enabled}
                           disabled={busy === t.source_view}
                           onChange={(e) => setDraft(t.source_view, { enabled: e.target.checked })}
                         />
+                      </TD>
+                      <TD className="font-medium">
+                        {t.source_view}
+                        {dirty ? <span className="ml-1.5 text-xs text-warning">unsaved</span> : null}
                       </TD>
                       <TD>
                         <Select
@@ -199,6 +210,10 @@ export function StreamingEditor() {
                             {t.last_error.slice(0, 120)}
                           </div>
                         ) : null}
+                      </TD>
+                      <TD className="whitespace-nowrap font-mono text-xs text-neutral-500">
+                        {fmtRunAt(t.last_run_at)}
+                        {t.last_rows_added != null ? <span className="ml-1 text-neutral-400">(+{t.last_rows_added})</span> : null}
                       </TD>
                       <TD>
                         <div className="flex items-center gap-1.5">
