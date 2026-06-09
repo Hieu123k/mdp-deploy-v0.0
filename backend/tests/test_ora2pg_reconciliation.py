@@ -275,10 +275,18 @@ def test_keys_endpoint_lists_40(client, auth_headers):
 
 def test_discover_keys_graceful_without_oracle(client, auth_headers):
     """No docker/Oracle in the test env → discovery returns available=False with all 40 tables
-    (pk null), never an error — the contract still holds for `.63`."""
+    (pk null), never an error — the contract still holds for `.63`.
+
+    Env-sensitive: this asserts the *no-Oracle* degradation path, so it only applies when Oracle
+    is unreachable (e.g. `.63` / CI). On an Oracle-capable host (e.g. `mdp2`, or tipa-mdp running
+    pytest during a prod deploy) discovery legitimately returns available=True, which is correct
+    behaviour rather than a failure — so we SKIP there to keep the suite green in every environment.
+    """
     res = client.post("/ora2pg/discover-keys", headers=auth_headers)
-    assert res.status_code == 200
+    assert res.status_code == 200  # must never 5xx, Oracle present or not
     body = res.json()
+    if body["available"]:
+        pytest.skip("Oracle reachable in this environment — the no-Oracle contract does not apply")
     assert body["available"] is False
     assert len(body["results"]) == 40
     assert all(r["pk_columns"] is None for r in body["results"])
