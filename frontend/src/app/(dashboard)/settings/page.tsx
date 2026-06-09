@@ -323,7 +323,7 @@ export default function SettingsPage() {
               <Radio size={16} /> Streaming (watermark-incremental)
             </span>
           }
-          subtitle="Per-table enable / granularity / cadence. The timestamp option unlocks only when the view exposes a time column (UPMT)."
+          subtitle="Enable a table and it auto-migrates. 'Run every' is the single cadence (min 2s). The timestamp option unlocks only when the view exposes a time column (UPMT)."
           action={
             <Button variant="secondary" size="sm" onClick={() => void loadStreaming()}>
               Refresh
@@ -344,7 +344,7 @@ export default function SettingsPage() {
                     <TH>Table</TH>
                     <TH>Enabled</TH>
                     <TH>Granularity</TH>
-                    <TH>Interval (s)</TH>
+                    <TH>Run every (s)</TH>
                     <TH>Lookback (d)</TH>
                     <TH>Cursor</TH>
                     <TH> </TH>
