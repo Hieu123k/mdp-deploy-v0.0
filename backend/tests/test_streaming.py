@@ -138,3 +138,22 @@ def test_run_once_is_graceful_without_oracle(client: TestClient, auth_headers: d
     body = r.json()
     assert body["ok"] is False
     assert body["error"]  # a clear message (no PK / target missing / oracle unreachable)
+
+
+# --- report-29 behaviour: per-table enable = the control; single cadence (no 30s floor / 60s tick) ---
+
+def test_report29_master_kill_switch_default_on() -> None:
+    """STREAMING_ENABLED is now a MASTER kill-switch that defaults ON (the loop always runs and the
+    per-table `enabled` flag is the real control)."""
+    from app.core.config import Settings
+
+    assert Settings.model_fields["streaming_enabled"].default is True
+
+
+def test_report29_single_cadence_floor() -> None:
+    """The per-table `poll_interval_sec` ("Run every (s)") is the one cadence, honoured down to a
+    small absolute floor — no separate 30s floor or fixed 60s loop tick."""
+    from app.services.streaming_service import MIN_INTERVAL, run_all_due
+
+    assert MIN_INTERVAL == 2
+    assert callable(run_all_due)

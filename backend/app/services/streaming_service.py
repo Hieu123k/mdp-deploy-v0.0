@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.ora2pg_catalog import MIGRATABLE_TABLES, Ora2pgTable, get_table
+from app.models.migration import MigrationJob
 from app.models.streaming_config import StreamingConfig
 from app.services import ora2pg_runner
 
@@ -181,6 +182,13 @@ def probe_view_columns(table: Ora2pgTable) -> tuple[list[str], str | None]:
     return cols, (None if cols else (text_out.strip()[-200:] or "no columns / unreachable"))
 
 
+def _job_pk(db: Session, table: Ora2pgTable) -> list[str] | None:
+    """The canonical PK from migration_jobs.primary_key_columns (one source of truth shared with
+    migrate/Repair). None if no job / not yet discovered."""
+    job = db.scalar(select(MigrationJob).where(MigrationJob.name == f"ora2pg_{table.target_table}"))
+    return (job.primary_key_columns or None) if job is not None else None
+
+
 def _discover_pk(table: Ora2pgTable) -> list[str] | None:
     """Best-effort PK discovery for one table (reuses the ora2pg-container introspection)."""
     try:
@@ -211,14 +219,15 @@ def run_cycle(db: Session, cfg: StreamingConfig, *, force: bool = False) -> dict
 
     gran = effective_granularity(cfg.granularity, cfg.ts_time_col)
 
-    pk = cfg.primary_key_columns
-    if not pk:
-        pk = _discover_pk(table)
-        if pk:
-            cfg.primary_key_columns = pk
+    # Canonical PK = migration_jobs.primary_key_columns (set by discover-keys or the dashboard PK
+    # editor). Prefer it so a PK change on the Migration dashboard takes effect for streaming too;
+    # fall back to the config's own copy, then live discovery. Keep the config in sync for display.
+    pk = _job_pk(db, table) or cfg.primary_key_columns or _discover_pk(table)
+    if pk and cfg.primary_key_columns != pk:
+        cfg.primary_key_columns = pk
     if not pk:
         return _finish(db, cfg, table, ok=False, status="error",
-                       error="no primary_key_columns (discover-keys found none — ON CONFLICT needs a unique key)")
+                       error="no primary_key_columns (run Scan PK / set it on the dashboard — ON CONFLICT needs a unique key)")
 
     if not ora2pg_runner.target_exists(table.target_table):
         return _finish(db, cfg, table, ok=False, status="error",
