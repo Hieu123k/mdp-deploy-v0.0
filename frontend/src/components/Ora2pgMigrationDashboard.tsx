@@ -175,17 +175,30 @@ export function Ora2pgMigrationDashboard() {
     try {
       const { batch_id } = await verifyBatch(sel);
       stopBatchPoll();
+      let failures = 0;
       batchPollRef.current = setInterval(async () => {
         try {
           const st = await verifyBatchStatus(batch_id);
+          failures = 0;
           setBatchStatus(st.tables);
           if (st.finished) {
             stopBatchPoll();
             setBatchRunning(false);
             await loadTables(); // refresh verdicts / counts after the batch completes
           }
-        } catch {
-          /* ignore transient poll errors */
+        } catch (e) {
+          // A 404 is terminal (batch evicted / backend restarted) — stop so the UI never strands.
+          if (e instanceof ApiError && e.status === 404) {
+            stopBatchPoll();
+            setBatchRunning(false);
+            setError("Verify batch is no longer available (server restarted?). Re-run if needed.");
+            return;
+          }
+          if (++failures >= 10) {
+            stopBatchPoll();
+            setBatchRunning(false);
+            setError("Lost contact with the verify batch — please retry.");
+          }
         }
       }, 1000);
     } catch (e) {

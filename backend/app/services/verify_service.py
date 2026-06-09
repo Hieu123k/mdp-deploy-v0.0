@@ -18,8 +18,9 @@ from collections import OrderedDict
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 
+from app.core.config import settings
 from app.core.ora2pg_catalog import Ora2pgTable, get_table
 from app.db.session import SessionLocal
 from app.models.migration import MigrationJob, MigrationRun, MigrationValidation
@@ -42,14 +43,13 @@ def _latest_run(db: Any, job_id: Any) -> MigrationRun | None:
 
 def _count_target(db: Any, target_table: str) -> int | None:
     """Exact COUNT(*) of the target staging table; SAVEPOINT-guarded so a missing relation does
-    not abort the surrounding transaction (postgres behaviour)."""
-    from sqlalchemy import text
-
+    not abort the surrounding transaction (postgres behaviour). Honours the configured target
+    schema (``settings.ora2pg_target_schema``) like every other counter in the codebase."""
     try:
         with db.begin_nested():
             return int(
                 db.execute(
-                    text(f'SELECT count(*) FROM "mdp_staging"."{target_table}"')
+                    text(f'SELECT count(*) FROM "{settings.ora2pg_target_schema}"."{target_table}"')
                 ).scalar()
             )
     except Exception:
@@ -170,8 +170,15 @@ def enqueue_batch(table_names: list[str]) -> str:
             "order": seen,
             "tables": {n: {"status": "queued"} for n in seen},
         }
-        while len(_status) > _MAX_BATCHES:
-            _status.popitem(last=False)
+        # Evict only FINISHED batches (oldest first) — never drop status for in-flight work.
+        if len(_status) > _MAX_BATCHES:
+            for bid in list(_status.keys()):
+                if len(_status) <= _MAX_BATCHES:
+                    break
+                b = _status[bid]
+                done = sum(1 for v in b["tables"].values() if v.get("status") in {"done", "error"})
+                if done >= len(b["order"]):
+                    del _status[bid]
     _ensure_worker()
     for n in seen:
         _q.put((batch_id, n))
