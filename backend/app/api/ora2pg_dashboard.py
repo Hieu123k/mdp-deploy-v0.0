@@ -10,16 +10,18 @@ import asyncio
 import csv
 import io
 import json
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import Response, StreamingResponse
+from pydantic import BaseModel
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, require_admin
 from app.core.config import settings
 from app.core.ora2pg_catalog import (
     MIGRATABLE_TABLES,
@@ -27,7 +29,7 @@ from app.core.ora2pg_catalog import (
     get_table,
     redact_conf,
 )
-from app.db.session import get_db
+from app.db.session import engine, get_db
 from app.models.migration import MigrationJob, MigrationRun, MigrationValidation
 from app.models.source_count import Ora2pgSourceCount
 from app.models.user import User
@@ -42,6 +44,7 @@ from app.services.ora2pg_runner import (
     start_repair,
     start_run,
 )
+from app.services.verify_service import enqueue_batch, get_batch_status, perform_verify
 
 DASHBOARD_VERSION = "v0.0"
 
@@ -191,14 +194,51 @@ def dashboard_info() -> dict[str, Any]:
     }
 
 
+def _all_target_columns(db: Session) -> dict[str, set[str]]:
+    """{target_table (lower): {columns (lower)}} for mdp_staging — one query, for PK warnings."""
+    out: dict[str, set[str]] = {}
+    try:
+        rows = db.execute(
+            text("SELECT table_name, column_name FROM information_schema.columns WHERE table_schema = :s"),
+            {"s": settings.ora2pg_target_schema},
+        ).fetchall()
+        for tn, cn in rows:
+            out.setdefault(str(tn).lower(), set()).add(str(cn).lower())
+    except Exception:
+        pass
+    return out
+
+
+def _pk_status(job: "MigrationJob | None", pk_columns, target_cols: set[str] | None) -> dict[str, Any]:
+    """Resolve the PK source (reference|manual|scanned) + any warnings for the dashboard."""
+    cfg = (job.config or {}) if job else {}
+    source = cfg.get("pk_source") or ("reference" if pk_columns else None)
+    warnings: list[str] = []
+    # The pk_name_match / pk_type flags describe the REFERENCE-doc PK only. Once an admin has
+    # overridden (manual) or a scan replaced it (scanned), those reference facts no longer describe
+    # the live PK, so the warning would be stale/false — only surface them while source==reference.
+    if source == "reference":
+        if cfg.get("pk_name_match") is False:
+            warnings.append("table name differs from JDE vanilla — verify PK applies")
+        if cfg.get("pk_type") == "surrogate":
+            warnings.append("PK is a surrogate key (UKID) — verify it suits upsert")
+    if pk_columns and target_cols:  # only when the target is migrated
+        missing = [c for c in pk_columns if c not in target_cols]
+        if missing:
+            warnings.append(f"PK column(s) not in view: {', '.join(missing)}")
+    return {"pk_source": source, "pk_warning": "; ".join(warnings) if warnings else None}
+
+
 @router.get("/tables")
 def list_tables(db: Annotated[Session, Depends(get_db)]) -> dict[str, Any]:
     items = []
     source_cache = get_all_source_counts(db)  # read cache once; NO Oracle call at load time
+    target_cols_map = _all_target_columns(db)  # one query for PK missing-column warnings
     for t in MIGRATABLE_TABLES:
         job = db.scalar(select(MigrationJob).where(MigrationJob.name == _job_name(t.target_table)))
         last = _latest_run(db, job.id) if job else None
         current_rows = _count_table(db, t.target_table)
+        pk = job.primary_key_columns if job else None
         items.append({
             "table": t.table,
             "ts_col": t.ts_col,
@@ -211,7 +251,8 @@ def list_tables(db: Annotated[Session, Depends(get_db)]) -> dict[str, Any]:
             "last_run_id": str(last.id) if last else None,
             "last_run_status": last.status if last else None,
             "last_run_at": last.started_at.isoformat() if last and last.started_at else None,
-            "pk_columns": job.primary_key_columns if job else None,
+            "pk_columns": pk,
+            **_pk_status(job, pk, target_cols_map.get(t.target_table.lower())),
             **_recon_fields(last),
             **_source_count_fields(source_cache.get(t.table.upper()), current_rows),
         })
@@ -286,44 +327,42 @@ def verify_table(
     table = get_table(table_name)
     if table is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown table")
-    job = db.scalar(select(MigrationJob).where(MigrationJob.name == _job_name(table.target_table)))
-    last = _latest_run(db, job.id) if job else None
+    return perform_verify(db, table)
 
-    target_rows = _count_table(db, table.target_table)  # exact COUNT (SAVEPOINT-guarded)
-    cache_row = verify_exact(db, table)  # exact Oracle source -> cache (or keeps prior, stale)
-    verdict = source_verdict(cache_row, target_rows)
-    src = cache_row.source_row_count if (cache_row and cache_row.status == "ok") else None
-    missed = (src - target_rows) if (src is not None and target_rows is not None) else None
 
-    # Record the recon result on the last run ONLY when official (exact MATCH/MISMATCH).
-    if last is not None and verdict in {"MATCH", "MISMATCH"}:
-        last.target_row_count = target_rows
-        last.source_row_count = src
-        last.validation_status = verdict
-        db.add(last)
-        db.add(MigrationValidation(
-            migration_run_id=last.id,
-            check_name="verify_target_row_count",
-            source_value=str(src) if src is not None else None,
-            target_value=str(target_rows) if target_rows is not None else None,
-            status="pass" if verdict == "MATCH" else "fail",
-            message=f"On-demand exact verify: target={target_rows}, source={src}, missed={missed}",
-        ))
-        db.commit()
+class VerifyBatchRequest(BaseModel):
+    tables: list[str]
 
+
+@router.post("/verify-batch", status_code=status.HTTP_202_ACCEPTED)
+def verify_batch(
+    payload: VerifyBatchRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> dict[str, Any]:
+    """Queue many tables for exact-verify. Every table (single or batched) runs through ONE global
+    worker that processes them **sequentially** — never two exact COUNTs at once. No cap on how
+    many tables are selected; extras just wait their turn. Unknown tables are recorded as ``error``
+    and the queue continues. Poll ``GET /ora2pg/verify-batch/{batch_id}`` for per-table status."""
+    tables = [t for t in (payload.tables or []) if t and t.strip()]
+    if not tables:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No tables selected")
+    batch_id = enqueue_batch(tables)
     return {
-        "table": table.table,
-        "target_table": table.target_table,
-        "target_rows": target_rows,
-        "source_count": src,
-        "source_count_mode": cache_row.count_mode if cache_row else None,
-        "source_stale": (cache_row.status != "ok") if cache_row else True,
-        "missed": missed,
-        "source_verdict": verdict,
-        "source_available": src is not None,
-        "last_run_id": str(last.id) if last else None,
-        "message": "Exact Oracle source count runs on .63; off-Oracle it stays ESTIMATE/stale.",
+        "batch_id": batch_id,
+        "queued": tables,
+        "status_url": f"/ora2pg/verify-batch/{batch_id}",
     }
+
+
+@router.get("/verify-batch/{batch_id}")
+def verify_batch_status(
+    batch_id: str,
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> dict[str, Any]:
+    snap = get_batch_status(batch_id)
+    if snap is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown batch")
+    return snap
 
 
 @router.post("/tables/{table_name}/repair", status_code=status.HTTP_202_ACCEPTED)
@@ -587,28 +626,208 @@ def list_keys(db: Annotated[Session, Depends(get_db)]) -> dict[str, Any]:
 @router.post("/discover-keys")
 def discover_keys(
     db: Annotated[Session, Depends(get_db)],
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(require_admin)],
+    table: str | None = None,
 ) -> dict[str, Any]:
-    """Discover each table's PK from the Oracle unique index and persist it onto the table's
-    MigrationJob.primary_key_columns. Needs Oracle → real only on `.63`; on the VPS it returns
-    available=False (all pk null) without error, so the contract is still testable."""
-    discovery = discover_oracle_keys(MIGRATABLE_TABLES)
+    """Discover PK(s) from the Oracle unique index and persist onto MigrationJob.primary_key_columns
+    (the canonical PK store) + sync into any streaming_config. ``table`` scans just that view (Scan
+    PK per-table); omitted = scan all 40. Needs Oracle → real only where reachable; off-Oracle it
+    returns available=False (all pk null) without error, so the contract is still testable.
+    Admin-only (mutates the canonical + streaming PK), and never overrides a manual PK
+    (manual > scanned > reference)."""
+    if table is not None:
+        one = get_table(table)
+        if one is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown table")
+        scan_list = [one]
+    else:
+        scan_list = MIGRATABLE_TABLES
+    discovery = discover_oracle_keys(scan_list)
     persisted = 0
+    skipped_manual = 0
     if discovery.get("available"):
         for r in discovery["results"]:
             if not r.get("pk_columns"):
                 continue
-            table = get_table(r["source_view"])
-            if table is None:
+            t = get_table(r["source_view"])
+            if t is None:
                 continue
-            job = _get_or_create_job(db, table)
+            job = _get_or_create_job(db, t)
+            if (job.config or {}).get("pk_source") == "manual":
+                skipped_manual += 1  # manual always wins — a scan must never clobber it
+                continue
             job.primary_key_columns = r["pk_columns"]
+            job.config = {**(job.config or {}), "pk_source": "scanned"}
             db.add(job)
+            _sync_streaming_pk(db, t.table, r["pk_columns"])
             persisted += 1
         db.commit()
     return {
         "available": discovery.get("available", False),
         "message": discovery.get("message"),
         "persisted": persisted,
+        "skipped_manual": skipped_manual,
         "results": discovery.get("results", []),
+    }
+
+
+def _sync_streaming_pk(db: Session, source_view: str, pk_columns: list[str] | None) -> None:
+    """Keep streaming_configs.primary_key_columns in sync with the canonical migration_jobs PK, so
+    migrate (Repair upsert) and streaming (upsert) use ONE primary key. No-op where the streaming
+    feature is absent (e.g. the standalone ui-bundle backend)."""
+    try:
+        from app.models.streaming_config import StreamingConfig
+
+        cfg = db.scalar(select(StreamingConfig).where(StreamingConfig.source_view == source_view.upper()))
+        if cfg is not None:
+            cfg.primary_key_columns = pk_columns
+            db.add(cfg)
+    except Exception:  # streaming model not present / any error → canonical job PK still stands
+        pass
+
+
+def _target_columns(target_table: str) -> set[str]:
+    """Lower-cased column names of the target staging table (for PK validation). Empty if missing."""
+    try:
+        with engine.connect() as conn:
+            rows = conn.exec_driver_sql(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = %s AND table_name = %s",
+                (settings.ora2pg_target_schema, target_table),
+            ).fetchall()
+        return {r[0].lower() for r in rows}
+    except Exception:
+        return set()
+
+
+# Strict identifier allowlist for PK column names (defence against DDL injection — these names are
+# interpolated into CREATE UNIQUE INDEX). PK columns are lower-cased first, so a-z/0-9/_ only.
+_PK_COL_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+
+
+def _validate_pk_identifiers(pk_columns: list[str]) -> None:
+    bad = [c for c in pk_columns if not _PK_COL_RE.fullmatch(c)]  # fullmatch: reject trailing-newline tricks
+    if bad:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid column name(s): {', '.join(bad)} — use lower-case letters, digits, underscore",
+        )
+
+
+def _pk_has_duplicates(target_table: str, pk_columns: list[str]) -> bool:
+    """True if the proposed PK is NOT unique in the migrated target (so a UNIQUE index would fail).
+    Columns are pre-validated identifiers. Returns False if undeterminable (the index build is the
+    final gate)."""
+    schema = settings.ora2pg_target_schema
+    cols = ", ".join(f'"{c}"' for c in pk_columns)
+    try:
+        with engine.connect() as conn:
+            raw = conn.connection
+            with raw.cursor() as cur:
+                cur.execute(
+                    f'SELECT 1 FROM "{schema}"."{target_table}" GROUP BY {cols} HAVING count(*) > 1 LIMIT 1'
+                )
+                return cur.fetchone() is not None
+    except Exception:
+        return False
+
+
+def _rebuild_unique_index(target_table: str, pk_columns: list[str]) -> tuple[bool, str | None]:
+    """Re-create the target's PK unique index on ``pk_columns`` ATOMICALLY: build a NEW unique index
+    under a temp name first, and only if that succeeds drop the old + rename. So a non-unique PK
+    (CREATE fails) leaves the prior index intact rather than the table index-less. Columns are
+    pre-validated identifiers. Returns (ok, error)."""
+    schema = settings.ora2pg_target_schema
+    idx = f"ux_{target_table}_pk"[:63]
+    tmp = f"ux_{target_table}_pk_new"[:63]
+    cols = ", ".join(f'"{c}"' for c in pk_columns)
+    try:
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            raw = conn.connection
+            with raw.cursor() as cur:
+                cur.execute(f'DROP INDEX IF EXISTS "{schema}"."{tmp}"')
+                cur.execute(f'CREATE UNIQUE INDEX "{tmp}" ON "{schema}"."{target_table}" ({cols})')
+                cur.execute(f'DROP INDEX IF EXISTS "{schema}"."{idx}"')
+                cur.execute(f'ALTER INDEX "{schema}"."{tmp}" RENAME TO "{idx}"')
+        return True, None
+    except Exception as exc:
+        try:  # best-effort cleanup of the temp index; the prior ux_<t>_pk is untouched on failure
+            with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+                with conn.connection.cursor() as cur:
+                    cur.execute(f'DROP INDEX IF EXISTS "{schema}"."{tmp}"')
+        except Exception:
+            pass
+        return False, str(exc).splitlines()[0][:300]
+
+
+class PrimaryKeyUpdate(BaseModel):
+    pk_columns: list[str]
+
+
+@router.put("/tables/{table_name}/primary-key")
+def set_primary_key(
+    table_name: str,
+    payload: PrimaryKeyUpdate,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_admin)],
+) -> dict[str, Any]:
+    """Admin-only: set a table's primary key (single or composite) → canonical
+    ``migration_jobs.primary_key_columns`` (synced to streaming_config) and rebuild the target's
+    UNIQUE index. Validates the columns exist in the migrated target; a non-unique PK rebuilds with
+    an error reported (not a crash)."""
+    table = get_table(table_name)
+    if table is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown table")
+    pk = [c.strip().lower() for c in (payload.pk_columns or []) if c and c.strip()]
+    if not pk:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="pk_columns must not be empty")
+    # ALWAYS validate identifiers before they can be persisted or reach any DDL (no SQL injection).
+    _validate_pk_identifiers(pk)
+
+    target_cols = _target_columns(table.target_table)
+    target_exists = bool(target_cols)
+    if target_exists:
+        unknown = [c for c in pk if c not in target_cols]
+        if unknown:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Column(s) not in {table.target_table}: {', '.join(unknown)}",
+            )
+        # Reject a non-unique PK up-front (clear error, no crash) so we never persist a PK whose
+        # UNIQUE index can't be built and never leave the table without an index.
+        if _pk_has_duplicates(table.target_table, pk):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"PK {pk} is NOT unique in {table.target_table} — pick a unique key (single or composite).",
+            )
+
+    # Build the unique index FIRST when the target exists: the atomic CREATE UNIQUE INDEX is the
+    # definitive uniqueness gate (the GROUP BY probe above can miss when it errors transiently). If
+    # the build fails we persist NOTHING and return a hard 409 — so a non-unique PK never gets saved
+    # as canonical and the contract "non-unique → non-2xx" holds even when the probe is undeterminable.
+    index_rebuilt, index_error = (False, None)
+    if target_exists:
+        index_rebuilt, index_error = _rebuild_unique_index(table.target_table, pk)
+        if not index_rebuilt:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"PK {pk} could not be made UNIQUE in {table.target_table}: {index_error}",
+            )
+    else:
+        index_error = "target not migrated yet — index will be (re)built on next load/streaming cycle"
+
+    # Persist canonical PK (pk_source=manual — overrides the reference default) + sync streaming.
+    job = _get_or_create_job(db, table)
+    job.primary_key_columns = pk
+    job.config = {**(job.config or {}), "pk_source": "manual"}
+    db.add(job)
+    _sync_streaming_pk(db, table.table, pk)
+    db.commit()
+
+    return {
+        "table": table.table,
+        "pk_columns": pk,
+        "index_rebuilt": index_rebuilt,
+        "index_error": index_error,
+        "message": "PK saved." + ("" if index_rebuilt else f" Index not unique-built: {index_error}"),
     }

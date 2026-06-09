@@ -1,28 +1,34 @@
 "use client";
 
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { CheckCircle2, Database, Download, Play, RefreshCw, Terminal } from "lucide-react";
+import { CheckCircle2, Database, Download, KeyRound, ListChecks, Play, RefreshCw, Terminal } from "lucide-react";
 import { Badge, type BadgeTone } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card, CardBody, CardHeader } from "@/components/ui/Card";
 import { Input } from "@/components/ui/Input";
-import { StreamingControl } from "@/components/StreamingControl";
 import { Select } from "@/components/ui/Select";
 import { Table, TBody, TD, TH, THead, TR } from "@/components/ui/Table";
+import { useAuth } from "@/components/auth/AuthProvider";
 import {
   ApiError,
   ora2pgConfigPreview,
+  ora2pgDiscoverKeys,
+  ora2pgDiscoverKeysTable,
   ora2pgDownloadReconciliation,
   ora2pgGetRun,
   ora2pgInfo,
   ora2pgListTables,
   ora2pgRepair,
+  ora2pgSetPrimaryKey,
   ora2pgStart,
   ora2pgStreamRun,
   ora2pgVerify,
+  verifyBatch,
+  verifyBatchStatus,
   type Ora2pgInfo,
   type Ora2pgProgress,
   type Ora2pgTable,
+  type VerifyBatchTable,
 } from "@/lib/api";
 
 function fmtInt(n: number | null | undefined): string {
@@ -53,6 +59,19 @@ function statusTone(status?: string): BadgeTone {
   }
 }
 
+function batchQueueTone(status?: string): BadgeTone {
+  switch (status) {
+    case "done":
+      return "success";
+    case "error":
+      return "danger";
+    case "running":
+      return "info";
+    default:
+      return "neutral"; // queued
+  }
+}
+
 function validationTone(status?: string | null): BadgeTone {
   switch (status) {
     case "MATCH":
@@ -69,9 +88,9 @@ function validationTone(status?: string | null): BadgeTone {
 function verdictLabel(v?: string | null): string {
   switch (v) {
     case "ESTIMATE":
-      return "≈ ước tính";
+      return "≈ estimate";
     case "PENDING":
-      return "chờ Verify";
+      return "Awaiting Verify";
     default:
       return v || "—";
   }
@@ -99,6 +118,20 @@ export function Ora2pgMigrationDashboard() {
 
   const [verifying, setVerifying] = useState<string | null>(null);
 
+  // Multi-Verify: selected tables + the active sequential batch's per-table queue status.
+  const [verifySel, setVerifySel] = useState<Set<string>>(new Set());
+  const [batchStatus, setBatchStatus] = useState<Record<string, VerifyBatchTable>>({});
+  const [batchRunning, setBatchRunning] = useState(false);
+  const batchPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Primary-Key editor (admin) + Scan (discover-keys).
+  const { user } = useAuth();
+  const isAdmin = user?.role === "admin";
+  const [pkBusy, setPkBusy] = useState<string | null>(null);
+  const [pkEdit, setPkEdit] = useState<string | null>(null);
+  const [pkDraft, setPkDraft] = useState<string>("");
+  const [pkMsg, setPkMsg] = useState<string | null>(null);
+
   const loadTables = useCallback(async () => {
     try {
       const r = await ora2pgListTables();
@@ -108,6 +141,65 @@ export function Ora2pgMigrationDashboard() {
       setError(e instanceof ApiError ? e.message : "Failed to load tables");
     }
   }, []);
+
+  const pkCoverage = useMemo(
+    () => tables.filter((t) => t.pk_columns && t.pk_columns.length > 0).length,
+    [tables],
+  );
+
+  const onScanAllPk = useCallback(async () => {
+    setPkBusy("__all__");
+    setPkMsg(null);
+    try {
+      const r = await ora2pgDiscoverKeys();
+      setPkMsg(r.available ? `Scan PK: ${r.persisted} table(s) updated.` : `Scan PK: ${r.message ?? "Oracle unreachable"}`);
+      await loadTables();
+    } catch (e) {
+      setPkMsg(e instanceof ApiError ? e.message : "Scan PK failed");
+    } finally {
+      setPkBusy(null);
+    }
+  }, [loadTables]);
+
+  const onScanTablePk = useCallback(
+    async (table: string) => {
+      setPkBusy(table);
+      setPkMsg(null);
+      try {
+        const r = await ora2pgDiscoverKeysTable(table);
+        setPkMsg(r.available ? `${table}: PK ${r.persisted ? "updated" : "not found"}.` : `${table}: ${r.message ?? "Oracle unreachable"}`);
+        await loadTables();
+      } catch (e) {
+        setPkMsg(e instanceof ApiError ? e.message : "Scan failed");
+      } finally {
+        setPkBusy(null);
+      }
+    },
+    [loadTables],
+  );
+
+  const onSavePk = useCallback(
+    async (table: string) => {
+      const cols = pkDraft.split(",").map((c) => c.trim()).filter(Boolean);
+      if (cols.length === 0) {
+        setPkMsg("Enter at least one column (comma-separated)");
+        return;
+      }
+      setPkBusy(table);
+      setPkMsg(null);
+      try {
+        const r = await ora2pgSetPrimaryKey(table, cols);
+        setPkMsg(`${table}: ${r.message}`);
+        setPkEdit(null);
+        await loadTables();
+      } catch (e) {
+        setPkMsg(e instanceof ApiError ? e.message : "Save PK failed");
+      } finally {
+        setPkBusy(null);
+      }
+    },
+    [pkDraft, loadTables],
+  );
 
   const onVerify = useCallback(
     async (table: string) => {
@@ -125,6 +217,67 @@ export function Ora2pgMigrationDashboard() {
     [loadTables],
   );
 
+  const toggleVerifySel = useCallback((table: string) => {
+    setVerifySel((cur) => {
+      const next = new Set(cur);
+      if (next.has(table)) next.delete(table);
+      else next.add(table);
+      return next;
+    });
+  }, []);
+
+  const toggleSelectAll = useCallback(() => {
+    setVerifySel((cur) => (cur.size === tables.length ? new Set() : new Set(tables.map((t) => t.table))));
+  }, [tables]);
+
+  const stopBatchPoll = useCallback(() => {
+    if (batchPollRef.current) {
+      clearInterval(batchPollRef.current);
+      batchPollRef.current = null;
+    }
+  }, []);
+
+  const onVerifySelected = useCallback(async () => {
+    const sel = Array.from(verifySel);
+    if (sel.length === 0) return;
+    setError(null);
+    setBatchRunning(true);
+    setBatchStatus(Object.fromEntries(sel.map((t) => [t, { status: "queued" as const }])));
+    try {
+      const { batch_id } = await verifyBatch(sel);
+      stopBatchPoll();
+      let failures = 0;
+      batchPollRef.current = setInterval(async () => {
+        try {
+          const st = await verifyBatchStatus(batch_id);
+          failures = 0;
+          setBatchStatus(st.tables);
+          if (st.finished) {
+            stopBatchPoll();
+            setBatchRunning(false);
+            await loadTables(); // refresh verdicts / counts after the batch completes
+          }
+        } catch (e) {
+          // A 404 is terminal (batch evicted / backend restarted) — stop so the UI never strands.
+          if (e instanceof ApiError && e.status === 404) {
+            stopBatchPoll();
+            setBatchRunning(false);
+            setError("Verify batch is no longer available (server restarted?). Re-run if needed.");
+            return;
+          }
+          if (++failures >= 10) {
+            stopBatchPoll();
+            setBatchRunning(false);
+            setError("Lost contact with the verify batch — please retry.");
+          }
+        }
+      }, 1000);
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Verify-selected failed");
+      setBatchRunning(false);
+    }
+  }, [verifySel, loadTables, stopBatchPoll]);
+
   const onDownloadLog = useCallback(async (format: "json" | "csv") => {
     try {
       await ora2pgDownloadReconciliation(format);
@@ -139,6 +292,7 @@ export function Ora2pgMigrationDashboard() {
     return () => {
       abortRef.current?.();
       if (pollRef.current) clearInterval(pollRef.current);
+      if (batchPollRef.current) clearInterval(batchPollRef.current);
     };
   }, [loadTables]);
 
@@ -286,7 +440,6 @@ export function Ora2pgMigrationDashboard() {
       : null;
 
   return (
-    <div className="space-y-4">
     <Card className="mb-4 border-brand/30">
       <CardHeader
         title={
@@ -410,6 +563,25 @@ export function Ora2pgMigrationDashboard() {
               Target table status &amp; reconciliation (mdp_staging)
             </h4>
             <div className="flex items-center gap-2">
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={onVerifySelected}
+                disabled={batchRunning || verifySel.size === 0}
+                title="Verify the ticked tables — runs in the background, one at a time"
+              >
+                <ListChecks size={14} />{" "}
+                {batchRunning ? "Verifying…" : `Verify selected${verifySel.size ? ` (${verifySel.size})` : ""}`}
+              </Button>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={onScanAllPk}
+                disabled={pkBusy !== null}
+                title="Discover primary keys (Oracle unique index) for all tables"
+              >
+                <KeyRound size={14} /> {pkBusy === "__all__" ? "Scanning…" : `Scan all PK (${pkCoverage}/${tables.length})`}
+              </Button>
               <Button variant="ghost" size="sm" onClick={() => onDownloadLog("csv")}>
                 <Download size={14} /> Log .csv
               </Button>
@@ -418,11 +590,24 @@ export function Ora2pgMigrationDashboard() {
               </Button>
             </div>
           </div>
+          {pkMsg && <p className="mb-2 text-xs text-neutral-600 dark:text-neutral-300">{pkMsg}</p>}
           <Table>
             <THead>
               <TR>
+                <TH>
+                  <input
+                    type="checkbox"
+                    aria-label="Select all"
+                    checked={tables.length > 0 && verifySel.size === tables.length}
+                    ref={(el) => {
+                      if (el) el.indeterminate = verifySel.size > 0 && verifySel.size < tables.length;
+                    }}
+                    onChange={toggleSelectAll}
+                  />
+                </TH>
                 <TH>Module</TH>
                 <TH>Table</TH>
+                <TH>Primary Key</TH>
                 <TH>Target</TH>
                 <TH>Current rows</TH>
                 <TH>Source</TH>
@@ -437,13 +622,74 @@ export function Ora2pgMigrationDashboard() {
               {tables.map((t) => (
                 <Fragment key={t.table}>
                 <TR>
+                  <TD>
+                    <input
+                      type="checkbox"
+                      aria-label={`Select ${t.table}`}
+                      checked={verifySel.has(t.table)}
+                      onChange={() => toggleVerifySel(t.table)}
+                    />
+                  </TD>
                   <TD className="text-neutral-500">{t.module}</TD>
-                  <TD className="font-medium text-neutral-800">
-                    {t.table}
-                    {t.pk_columns && t.pk_columns.length > 0 && (
-                      <span className="ml-1.5" title={`PK: ${t.pk_columns.join(", ")}`}>
-                        <Badge tone="info">PK</Badge>
-                      </span>
+                  <TD className="font-medium text-neutral-800">{t.table}</TD>
+                  <TD>
+                    {pkEdit === t.table ? (
+                      <div className="flex items-center gap-1">
+                        <Input
+                          value={pkDraft}
+                          onChange={(e) => setPkDraft(e.target.value)}
+                          className="max-w-[11rem]"
+                          placeholder="gldoc, gldct"
+                        />
+                        <Button size="sm" disabled={pkBusy === t.table} onClick={() => onSavePk(t.table)}>
+                          {pkBusy === t.table ? "…" : "Save"}
+                        </Button>
+                        <Button size="sm" variant="ghost" onClick={() => setPkEdit(null)} title="Cancel">
+                          ✕
+                        </Button>
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-1.5">
+                        {t.pk_columns && t.pk_columns.length > 0 ? (
+                          <span className="font-mono text-xs text-neutral-700 dark:text-neutral-300">
+                            {t.pk_columns.join(", ")}
+                          </span>
+                        ) : (
+                          <span className="text-neutral-400">—</span>
+                        )}
+                        {t.pk_source && (
+                          <Badge tone={t.pk_source === "manual" ? "info" : t.pk_source === "scanned" ? "success" : "neutral"}>
+                            {t.pk_source}
+                          </Badge>
+                        )}
+                        {t.pk_warning && (
+                          <span className="cursor-help text-warning" title={t.pk_warning}>
+                            ⚠ verify
+                          </span>
+                        )}
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          disabled={pkBusy === t.table}
+                          onClick={() => onScanTablePk(t.table)}
+                          title="Scan PK (discover-keys)"
+                        >
+                          {pkBusy === t.table ? "…" : "Scan"}
+                        </Button>
+                        {isAdmin && (
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => {
+                              setPkEdit(t.table);
+                              setPkDraft((t.pk_columns ?? []).join(", "));
+                            }}
+                            title="Edit PK (admin)"
+                          >
+                            Edit
+                          </Button>
+                        )}
+                      </div>
                     )}
                   </TD>
                   <TD className="text-neutral-500">
@@ -475,11 +721,18 @@ export function Ora2pgMigrationDashboard() {
                   </TD>
                   <TD className="text-neutral-500">{fmtDur(t.last_run_duration_sec)}</TD>
                   <TD>
-                    {t.source_verdict ? (
-                      <Badge tone={validationTone(t.source_verdict)}>{verdictLabel(t.source_verdict)}</Badge>
-                    ) : (
-                      <span className="text-neutral-400">—</span>
-                    )}
+                    <div className="flex flex-col items-start gap-1">
+                      {t.source_verdict ? (
+                        <Badge tone={validationTone(t.source_verdict)}>{verdictLabel(t.source_verdict)}</Badge>
+                      ) : (
+                        <span className="text-neutral-400">—</span>
+                      )}
+                      {batchStatus[t.table] && (
+                        <Badge tone={batchQueueTone(batchStatus[t.table].status)}>
+                          {batchStatus[t.table].status}
+                        </Badge>
+                      )}
+                    </div>
                   </TD>
                   <TD>
                     {t.last_run_status ? (
@@ -518,7 +771,7 @@ export function Ora2pgMigrationDashboard() {
                 </TR>
                 {activeTable === t.table && progress && (
                   <TR>
-                    <TD colSpan={10} className="bg-brand/5">
+                    <TD colSpan={12} className="bg-brand/5">
                       <div className="flex items-center gap-3 px-1 py-1">
                         <Badge tone={statusTone(progress.status)}>
                           {progress.status}
@@ -547,8 +800,6 @@ export function Ora2pgMigrationDashboard() {
         </div>
       </CardBody>
     </Card>
-      <StreamingControl />
-    </div>
   );
 }
 

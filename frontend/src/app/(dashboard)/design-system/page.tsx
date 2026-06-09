@@ -9,7 +9,7 @@ import { Badge, type BadgeTone } from "@/components/ui/Badge";
 import { Table, THead, TBody, TR, TH, TD } from "@/components/ui/Table";
 import { Modal } from "@/components/ui/Modal";
 
-// Full literal class strings (Tailwind JIT không nhận class ghép động).
+// Full literal class strings (Tailwind JIT does not pick up dynamically-composed classes).
 const BRAND = [
   { k: "50", c: "bg-brand-50" },
   { k: "100", c: "bg-brand-100" },

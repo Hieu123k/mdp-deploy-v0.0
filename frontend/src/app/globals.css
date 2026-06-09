@@ -7,6 +7,13 @@
   --foreground: #161718;
 }
 
+/* Dark theme (toggled by adding `.dark` on <html>; Tailwind darkMode:"class"). Page bg + text
+   switch via the CSS vars above; key surfaces add `dark:` variants in their components. */
+.dark {
+  --background: #161718;
+  --foreground: #F5F5F6;
+}
+
 @layer base {
   html {
     -webkit-text-size-adjust: 100%;

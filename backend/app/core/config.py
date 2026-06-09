@@ -32,6 +32,10 @@ class Settings(BaseSettings):
     ora2pg_data_limit: int = 50000
     # Target schema in MDP's own postgres (design 1B: no separate DW, no FDW)
     ora2pg_target_schema: str = "mdp_staging"
+    # Optional path to an EXTRA catalog JSON (same shape as jde_migrate_tables.json) appended to
+    # the built-in table catalog at import time. Empty = built-in only. Used to register
+    # environment-specific tables (e.g. sandbox test fixtures) WITHOUT editing the repo catalog.
+    ora2pg_extra_catalog: str = ""
 
     # --- Source-count refresher (background estimate of Oracle source rows -> cache) ---
     # Default OFF; only turned on where Oracle is reachable (.63). The periodic loop only ever
@@ -39,14 +43,11 @@ class Settings(BaseSettings):
     ora2pg_source_count_enabled: bool = False
     ora2pg_source_count_interval: int = 300  # seconds between estimate refreshes
 
-    # --- Streaming (watermark-incremental sync: Oracle change -> upsert into Postgres) ---
-    # The poll loop ALWAYS runs (singleton); each `streaming_interval` tick it runs a cycle for
-    # every streaming_config table that is `enabled` AND due (now - last_run_at >= poll_interval_sec).
-    # Per-table `enabled` (toggled on the Settings UI) is the control: enabling a table is enough to
-    # start auto-migration — no env flip / restart. `streaming_enabled` is now only a MASTER
-    # kill-switch (default ON) for ops to globally pause; an idle loop (no enabled table) is near-free.
+    # --- Streaming (watermark-incremental) poll loop (prompt 27) ---
+    # Loop ALWAYS runs (singleton); per-table `enabled` (Settings UI) is the control. This is now
+    # only a MASTER kill-switch (default ON) for ops to globally pause.
     streaming_enabled: bool = True
-    streaming_interval: int = 60  # seconds between loop ticks (per-table cadence = poll_interval_sec)
+    streaming_interval: int = 60  # loop tick seconds (per-table cadence = poll_interval_sec)
 
     @model_validator(mode="after")
     def validate_production_settings(self) -> "Settings":

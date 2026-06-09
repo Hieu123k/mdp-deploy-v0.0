@@ -35,7 +35,7 @@ export function TR({
   children: ReactNode;
   className?: string;
 }) {
-  // hàng hover:bg-neutral-50 (context/04)
+  // row hover:bg-neutral-50 (context/04)
   return (
     <tr className={cn("transition-colors hover:bg-neutral-50", className)}>
       {children}

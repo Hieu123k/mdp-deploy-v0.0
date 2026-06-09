@@ -6,6 +6,7 @@ from app.models.source_count import Ora2pgSourceCount
 from app.models.streaming_config import StreamingConfig
 from app.models.transaction import Transaction
 from app.models.user import User
+from app.models.user_preferences import UserPreference
 
 __all__ = [
     "ApiKey",
@@ -18,4 +19,5 @@ __all__ = [
     "StreamingConfig",
     "Transaction",
     "User",
+    "UserPreference",
 ]

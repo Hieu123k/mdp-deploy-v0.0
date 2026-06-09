@@ -722,6 +722,8 @@ export type Ora2pgTable = {
   last_validation_status: string | null;
   last_run_duration_sec: number | null;
   pk_columns: string[] | null;
+  pk_source: string | null; // reference | manual | scanned
+  pk_warning: string | null; // name-mismatch / surrogate UKID / column not in view
   // Source-count cache (background estimate + on-demand exact); populated on page load.
   source_count: number | null;
   source_count_mode: string | null; // estimate | exact
@@ -817,6 +819,23 @@ export const ora2pgDiscoverKeys = () =>
     "/ora2pg/discover-keys",
     { method: "POST" },
   );
+export const ora2pgDiscoverKeysTable = (table: string) =>
+  req<{ available: boolean; message: string | null; persisted: number; results: unknown[] }>(
+    `/ora2pg/discover-keys?table=${encodeURIComponent(table)}`,
+    { method: "POST" },
+  );
+export type Ora2pgPkResult = {
+  table: string;
+  pk_columns: string[];
+  index_rebuilt: boolean;
+  index_error: string | null;
+  message: string;
+};
+export const ora2pgSetPrimaryKey = (table: string, pk_columns: string[]) =>
+  req<Ora2pgPkResult>(`/ora2pg/tables/${encodeURIComponent(table)}/primary-key`, {
+    method: "PUT",
+    body: JSON.stringify({ pk_columns }),
+  });
 
 /** Download the reconciliation log (json|csv) via an authed fetch + blob. */
 export async function ora2pgDownloadReconciliation(format: "json" | "csv"): Promise<void> {
@@ -881,7 +900,60 @@ export function ora2pgStreamRun(
   return () => ctrl.abort();
 }
 
-// --- Streaming (watermark-incremental) ------------------------------------------------------
+// --- User preferences (theme + per-user nav/RBAC tab config) --------------------------------
+
+export type NavOverride = { visible?: boolean; label?: string; order?: number };
+export type NavConfig = Record<string, NavOverride>;
+export type Preferences = { user_id?: string; theme: string; nav_config: NavConfig };
+
+export const getMyPreferences = () => req<Preferences>("/preferences/me");
+export const updateMyPreferences = (body: { theme?: string; nav_config?: NavConfig }) =>
+  req<Preferences>("/preferences/me", { method: "PUT", body: JSON.stringify(body) });
+
+export type UserPreferenceRow = {
+  user_id: string;
+  username: string;
+  role: string;
+  is_active?: boolean;
+  theme: string;
+  nav_config: NavConfig;
+};
+export const listUserPreferences = () => req<{ users: UserPreferenceRow[] }>("/preferences/users");
+export const getUserPreferences = (userId: string) =>
+  req<UserPreferenceRow>(`/preferences/users/${userId}`);
+export const setUserPreferences = (
+  userId: string,
+  body: { theme?: string; nav_config?: NavConfig },
+) => req<UserPreferenceRow>(`/preferences/users/${userId}`, { method: "PUT", body: JSON.stringify(body) });
+
+// --- Multi-Verify (sequential queue) --------------------------------------------------------
+
+export type VerifyBatchTable = {
+  status: "queued" | "running" | "done" | "error";
+  verdict?: string | null;
+  target_rows?: number | null;
+  source_count?: number | null;
+  missed?: number | null;
+  error?: string | null;
+};
+export type VerifyBatchStatus = {
+  batch_id: string;
+  order: string[];
+  tables: Record<string, VerifyBatchTable>;
+  total: number;
+  completed: number;
+  finished: boolean;
+};
+
+export const verifyBatch = (tables: string[]) =>
+  req<{ batch_id: string; queued: string[]; status_url: string }>("/ora2pg/verify-batch", {
+    method: "POST",
+    body: JSON.stringify({ tables }),
+  });
+export const verifyBatchStatus = (batchId: string) =>
+  req<VerifyBatchStatus>(`/ora2pg/verify-batch/${batchId}`);
+
+// --- Streaming config (consume prompt-27 API; degrades to 404 if backend lacks it) ----------
 
 export type StreamingTable = {
   source_view: string;
@@ -893,7 +965,6 @@ export type StreamingTable = {
   granularity: string;
   poll_interval_sec: number;
   lookback_days: number;
-  primary_key_columns: string[] | null;
   last_watermark: string | null;
   last_watermark_time: string | null;
   last_run_at: string | null;
@@ -902,43 +973,30 @@ export type StreamingTable = {
   last_error: string | null;
   has_ts_time_col: boolean;
 };
-
 export type StreamingStatus = {
-  loop: { enabled: boolean; running: boolean; last_cycle: unknown; last_result: unknown };
+  loop: { enabled: boolean; running: boolean };
   tables: StreamingTable[];
 };
-
 export type StreamingConfigUpdate = Partial<{
   enabled: boolean;
-  ts_col: string;
-  ts_time_col: string;
   granularity: string;
   poll_interval_sec: number;
   lookback_days: number;
-  primary_key_columns: string[];
+  ts_col: string;
+  ts_time_col: string;
 }>;
-
 export type StreamingRunResult = {
   ok: boolean;
-  table: string;
-  status: string;
-  predicate: string | null;
   rows_added: number | null;
   cursor: string | null;
-  cursor_time: string | null;
   error: string | null;
-  rows_before?: number | null;
-  rows_after?: number | null;
-  exit_code?: number | null;
 };
 
 export const streamingStatus = () => req<StreamingStatus>("/streaming/status");
-
 export const streamingUpdateConfig = (table: string, body: StreamingConfigUpdate) =>
   req<StreamingTable>(`/streaming/config/${encodeURIComponent(table)}`, {
     method: "PUT",
     body: JSON.stringify(body),
   });
-
 export const streamingRunOnce = (table: string) =>
   req<StreamingRunResult>(`/streaming/run-once/${encodeURIComponent(table)}`, { method: "POST" });

@@ -39,6 +39,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       ORA2PG_CONTAINER: ${ORA2PG_CONTAINER:-mdp2_ora2pg}
       ORA2PG_SHARED_DIR: /opt/ora2pg
+      ORA2PG_EXTRA_CATALOG: ${ORA2PG_EXTRA_CATALOG:-}
       # Real Oracle: the local ora-free sandbox (reachable once ora-free joins mdp2_default).
       ORACLE_HOST: ${ORACLE_HOST}
       ORACLE_PORT: ${ORACLE_PORT:-1521}

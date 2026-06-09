@@ -1,0 +1,523 @@
+{
+  "version": "9.20",
+  "source": "JDE_PrimaryKeys_Reference_9.20.csv (ERPRef vanilla physical PKs)",
+  "tables": [
+    {
+      "table_id": "F4101",
+      "source_view": "V2_PRO_F4101",
+      "pk_columns_physical": [
+        "IMITM"
+      ],
+      "name_match": true,
+      "pk_type": "natural",
+      "vanilla_name": "Item Master"
+    },
+    {
+      "table_id": "F4102",
+      "source_view": "V2_PRO_F4102",
+      "pk_columns_physical": [
+        "IBMCU",
+        "IBITM"
+      ],
+      "name_match": true,
+      "pk_type": "natural",
+      "vanilla_name": "Item Branch File"
+    },
+    {
+      "table_id": "F4105",
+      "source_view": "V2_PRO_F4105",
+      "pk_columns_physical": [
+        "COITM",
+        "COMCU",
+        "COLOCN",
+        "COLOTN",
+        "COLEDG"
+      ],
+      "name_match": true,
+      "pk_type": "natural",
+      "vanilla_name": "Item Cost File"
+    },
+    {
+      "table_id": "F4111",
+      "source_view": "V2_PRO_F4111",
+      "pk_columns_physical": [
+        "ILUKID"
+      ],
+      "name_match": true,
+      "pk_type": "surrogate",
+      "vanilla_name": "Item Ledger File (Cardex)"
+    },
+    {
+      "table_id": "F41021",
+      "source_view": "V2_PRO_F41021",
+      "pk_columns_physical": [
+        "LIITM",
+        "LIMCU",
+        "LILOCN",
+        "LILOTN"
+      ],
+      "name_match": true,
+      "pk_type": "natural",
+      "vanilla_name": "Item Location File"
+    },
+    {
+      "table_id": "F41002",
+      "source_view": "V2_PRO_F41002",
+      "pk_columns_physical": [
+        "UMMCU",
+        "UMITM",
+        "UMUM",
+        "UMRUM"
+      ],
+      "name_match": true,
+      "pk_type": "natural",
+      "vanilla_name": "Item UoM Conversion Factors"
+    },
+    {
+      "table_id": "F41061",
+      "source_view": "V2_PRO_F41061",
+      "pk_columns_physical": [
+        "CBMCU",
+        "CBAN8",
+        "CBITM",
+        "CBCATN",
+        "CBCRCD",
+        "CBUOM",
+        "CBUORG",
+        "CBEXDJ"
+      ],
+      "name_match": false,
+      "pk_type": "natural",
+      "vanilla_name": "Supplier Price/Catalog File"
+    },
+    {
+      "table_id": "F4140",
+      "source_view": "V2_PRO_F4140",
+      "pk_columns_physical": [
+        "PICYNO"
+      ],
+      "name_match": false,
+      "pk_type": "natural",
+      "vanilla_name": "Cycle Count Header File"
+    },
+    {
+      "table_id": "F4141",
+      "source_view": "V2_PRO_F4141",
+      "pk_columns_physical": [
+        "PJCYNO",
+        "PJLITM",
+        "PJMCU",
+        "PJLOCN",
+        "PJLOTN",
+        "PJSTUN"
+      ],
+      "name_match": false,
+      "pk_type": "natural",
+      "vanilla_name": "Cycle Count Transaction File"
+    },
+    {
+      "table_id": "F4301",
+      "source_view": "V2_PRO_F4301",
+      "pk_columns_physical": [
+        "PHDOCO",
+        "PHDCTO",
+        "PHKCOO",
+        "PHSFXO"
+      ],
+      "name_match": true,
+      "pk_type": "natural",
+      "vanilla_name": "Purchase Order Header"
+    },
+    {
+      "table_id": "F4311",
+      "source_view": "V2_PRO_F4311",
+      "pk_columns_physical": [
+        "PDDOCO",
+        "PDDCTO",
+        "PDKCOO",
+        "PDSFXO",
+        "PDLNID"
+      ],
+      "name_match": true,
+      "pk_type": "natural",
+      "vanilla_name": "Purchase Order Detail File"
+    },
+    {
+      "table_id": "F43090",
+      "source_view": "V2_PRO_F43090",
+      "pk_columns_physical": [
+        "PCAN8",
+        "PCMCU",
+        "PCITM"
+      ],
+      "name_match": false,
+      "pk_type": "natural",
+      "vanilla_name": "Supplier/Item Relationships"
+    },
+    {
+      "table_id": "F43092",
+      "source_view": "V2_PRO_F43092",
+      "pk_columns_physical": [
+        "PXDOCO",
+        "PXDCTO",
+        "PXKCOO",
+        "PXSFXO",
+        "PXLNID",
+        "PXNLIN",
+        "PXUOM",
+        "PXOPRS"
+      ],
+      "name_match": false,
+      "pk_type": "natural",
+      "vanilla_name": "PO Receipt Routing File"
+    },
+    {
+      "table_id": "F43099",
+      "source_view": "V2_PRO_F43099",
+      "pk_columns_physical": [
+        "PODOCO",
+        "PODCTO",
+        "POKCOO",
+        "POSFXO",
+        "POLNID",
+        "PONLIN",
+        "POUPMJ",
+        "POTDAY",
+        "POMCDE"
+      ],
+      "name_match": false,
+      "pk_type": "natural",
+      "vanilla_name": "Receipt Routing Ledger File"
+    },
+    {
+      "table_id": "F43121",
+      "source_view": "V2_PRO_F43121",
+      "pk_columns_physical": [
+        "PRMATC",
+        "PRDOCO",
+        "PRDCTO",
+        "PRKCOO",
+        "PRSFXO",
+        "PRLNID",
+        "PRNLIN",
+        "PRDOC"
+      ],
+      "name_match": false,
+      "pk_type": "natural",
+      "vanilla_name": "Purchase Order Receiver File"
+    },
+    {
+      "table_id": "F43199",
+      "source_view": "V2_PRO_F43199",
+      "pk_columns_physical": [
+        "OLUKID"
+      ],
+      "name_match": false,
+      "pk_type": "surrogate",
+      "vanilla_name": "P.O. Detail Ledger (Flexible)"
+    },
+    {
+      "table_id": "F4008",
+      "source_view": "V2_PRO_F4008",
+      "pk_columns_physical": [
+        "TATXA1",
+        "TAITM",
+        "TAEFDJ"
+      ],
+      "name_match": false,
+      "pk_type": "natural",
+      "vanilla_name": "Tax Areas"
+    },
+    {
+      "table_id": "F4211",
+      "source_view": "V2_PRO_F4211",
+      "pk_columns_physical": [
+        "SDDOCO",
+        "SDDCTO",
+        "SDKCOO",
+        "SDLNID"
+      ],
+      "name_match": true,
+      "pk_type": "natural",
+      "vanilla_name": "Sales Order Detail File"
+    },
+    {
+      "table_id": "F4801",
+      "source_view": "V2_PRO_F4801",
+      "pk_columns_physical": [
+        "WADOCO"
+      ],
+      "name_match": true,
+      "pk_type": "natural",
+      "vanilla_name": "Work Order Master File"
+    },
+    {
+      "table_id": "F3002",
+      "source_view": "V2_PRO_F3002",
+      "pk_columns_physical": [
+        "IXKIT",
+        "IXMMCU",
+        "IXTBM",
+        "IXBQTY",
+        "IXCPNB",
+        "IXSBNT",
+        "IXCOBY"
+      ],
+      "name_match": false,
+      "pk_type": "natural",
+      "vanilla_name": "Bill of Material Master File"
+    },
+    {
+      "table_id": "F30026",
+      "source_view": "V2_PRO_F30026",
+      "pk_columns_physical": [
+        "IEITM",
+        "IEMMCU",
+        "IELOCN",
+        "IELOTN",
+        "IELEDG",
+        "IECOST"
+      ],
+      "name_match": true,
+      "pk_type": "natural",
+      "vanilla_name": "Item Cost Component Add-Ons"
+    },
+    {
+      "table_id": "F3003",
+      "source_view": "V2_PRO_F3003",
+      "pk_columns_physical": [
+        "IRMMCU",
+        "IRKIT",
+        "IRTRT",
+        "IRBQTY",
+        "IROPSQ",
+        "IROPSC",
+        "IRLINE",
+        "IREFFF"
+      ],
+      "name_match": false,
+      "pk_type": "natural",
+      "vanilla_name": "Routing Master File"
+    },
+    {
+      "table_id": "F3111",
+      "source_view": "V2_PRO_F3111",
+      "pk_columns_physical": [
+        "WMUKID"
+      ],
+      "name_match": false,
+      "pk_type": "surrogate",
+      "vanilla_name": "Work Order Parts List"
+    },
+    {
+      "table_id": "F3112",
+      "source_view": "V2_PRO_F3112",
+      "pk_columns_physical": [
+        "WLDOCO",
+        "WLOPSQ",
+        "WLOPSC",
+        "WLMCU"
+      ],
+      "name_match": false,
+      "pk_type": "natural",
+      "vanilla_name": "Work Order Routing"
+    },
+    {
+      "table_id": "F0901",
+      "source_view": "V2_PRO_F0901",
+      "pk_columns_physical": [
+        "GMAID"
+      ],
+      "name_match": true,
+      "pk_type": "natural",
+      "vanilla_name": "Account Master"
+    },
+    {
+      "table_id": "F0902",
+      "source_view": "V2_PRO_F0902",
+      "pk_columns_physical": [
+        "GBAID",
+        "GBCTRY",
+        "GBFY",
+        "GBFQ",
+        "GBLT",
+        "GBSBL",
+        "GBSBLT",
+        "GBCRCD"
+      ],
+      "name_match": true,
+      "pk_type": "natural",
+      "vanilla_name": "Account Balances"
+    },
+    {
+      "table_id": "F0911",
+      "source_view": "V2_PRO_F0911",
+      "pk_columns_physical": [
+        "GLDCT",
+        "GLDOC",
+        "GLKCO",
+        "GLDGJ",
+        "GLJELN",
+        "GLLT",
+        "GLEXTL"
+      ],
+      "name_match": true,
+      "pk_type": "natural",
+      "vanilla_name": "Account Ledger"
+    },
+    {
+      "table_id": "F0006",
+      "source_view": "V2_PRO_F0006",
+      "pk_columns_physical": [
+        "MCMCU"
+      ],
+      "name_match": true,
+      "pk_type": "natural",
+      "vanilla_name": "Business Unit Master"
+    },
+    {
+      "table_id": "F0411",
+      "source_view": "V2_PRO_F0411",
+      "pk_columns_physical": [
+        "RPDOC",
+        "RPDCT",
+        "RPKCO",
+        "RPSFX",
+        "RPSFXE"
+      ],
+      "name_match": true,
+      "pk_type": "natural",
+      "vanilla_name": "Accounts Payable Ledger"
+    },
+    {
+      "table_id": "F0401",
+      "source_view": "V2_PRO_F0401",
+      "pk_columns_physical": [
+        "A6AN8"
+      ],
+      "name_match": true,
+      "pk_type": "natural",
+      "vanilla_name": "Supplier Master"
+    },
+    {
+      "table_id": "F0015",
+      "source_view": "V2_PRO_F0015",
+      "pk_columns_physical": [
+        "CXCRCD",
+        "CXCRDC",
+        "CXAN8",
+        "CXRTTYP",
+        "CXEFT"
+      ],
+      "name_match": false,
+      "pk_type": "natural",
+      "vanilla_name": "Currency Exchange Rates"
+    },
+    {
+      "table_id": "F0030",
+      "source_view": "V2_PRO_F0030",
+      "pk_columns_physical": [
+        "AYUKID"
+      ],
+      "name_match": true,
+      "pk_type": "surrogate",
+      "vanilla_name": "Bank Transit Master"
+    },
+    {
+      "table_id": "F0101",
+      "source_view": "V2_PRO_F0101",
+      "pk_columns_physical": [
+        "ABAN8"
+      ],
+      "name_match": true,
+      "pk_type": "natural",
+      "vanilla_name": "Address Book Master"
+    },
+    {
+      "table_id": "F0111",
+      "source_view": "V2_PRO_F0111",
+      "pk_columns_physical": [
+        "WWAN8",
+        "WWIDLN"
+      ],
+      "name_match": true,
+      "pk_type": "natural",
+      "vanilla_name": "Address Book — Who's Who"
+    },
+    {
+      "table_id": "F0115",
+      "source_view": "V2_PRO_F0115",
+      "pk_columns_physical": [
+        "WPAN8",
+        "WPIDLN",
+        "WPCNLN",
+        "WPRCK7"
+      ],
+      "name_match": true,
+      "pk_type": "natural",
+      "vanilla_name": "Address Book — Phone Numbers"
+    },
+    {
+      "table_id": "F0116",
+      "source_view": "V2_PRO_F0116",
+      "pk_columns_physical": [
+        "ALAN8",
+        "ALEFTB"
+      ],
+      "name_match": true,
+      "pk_type": "natural",
+      "vanilla_name": "Address by Date"
+    },
+    {
+      "table_id": "F01151",
+      "source_view": "V2_PRO_F01151",
+      "pk_columns_physical": [
+        "EAAN8",
+        "EAIDLN",
+        "EARCK7"
+      ],
+      "name_match": true,
+      "pk_type": "natural",
+      "vanilla_name": "Electronic Address"
+    },
+    {
+      "table_id": "F00165",
+      "source_view": "V2_PRO_F00165",
+      "pk_columns_physical": [
+        "GDOBNM",
+        "GDTXKY",
+        "GDMOSEQN"
+      ],
+      "name_match": false,
+      "pk_type": "natural",
+      "vanilla_name": "Media Objects Storage"
+    },
+    {
+      "table_id": "F1201",
+      "source_view": "V2_PRO_F1201",
+      "pk_columns_physical": [
+        "FANUMB"
+      ],
+      "name_match": true,
+      "pk_type": "natural",
+      "vanilla_name": "Asset Master File"
+    },
+    {
+      "table_id": "F1202",
+      "source_view": "V2_PRO_F1202",
+      "pk_columns_physical": [
+        "FLAID",
+        "FLCTRY",
+        "FLFY",
+        "FLFQ",
+        "FLNUMB",
+        "FLSBL",
+        "FLSBLT",
+        "FLLT"
+      ],
+      "name_match": true,
+      "pk_type": "natural",
+      "vanilla_name": "Asset Account Balances File"
+    }
+  ]
+}

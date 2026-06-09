@@ -18,6 +18,7 @@ from app.api.migration_jobs import router as migration_jobs_router
 from app.api.migration_templates import router as migration_templates_router
 from app.api.ora2pg_dashboard import router as ora2pg_dashboard_router
 from app.api.outbound import router as outbound_router
+from app.api.preferences import router as preferences_router
 from app.api.streaming import router as streaming_router
 from app.api.transactions import router as transactions_router
 from app.api.users import router as users_router
@@ -32,6 +33,12 @@ from app.services.user_service import seed_default_admin
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     with SessionLocal() as db:
         seed_default_admin(db)
+        try:
+            from app.services.pk_reference_service import seed_reference_primary_keys
+
+            seed_reference_primary_keys(db)  # idempotent; never overrides a manual PK
+        except Exception:  # pragma: no cover - never block startup on the PK seed
+            pass
     refresher = SourceCountRefresher()
     try:
         refresher.start()  # no-op unless ORA2PG_SOURCE_COUNT_ENABLED
@@ -82,4 +89,5 @@ app.include_router(ora2pg_dashboard_router)
 app.include_router(inbound_router)
 app.include_router(outbound_router)
 app.include_router(transactions_router)
+app.include_router(preferences_router)
 app.include_router(streaming_router)

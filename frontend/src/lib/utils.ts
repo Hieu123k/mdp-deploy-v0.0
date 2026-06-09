@@ -1,4 +1,4 @@
-/** Nối className có điều kiện (gọn, không cần dependency). */
+/** Join classNames conditionally (compact, no dependency needed). */
 export type ClassValue = string | false | null | undefined;
 
 export function cn(...classes: ClassValue[]): string {
