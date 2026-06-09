@@ -221,7 +221,7 @@ def _ensure_unique_index(schema: str, target: str, pk_columns: list[str]) -> Non
     if not pk_columns:
         return
     cols_lower = [c.lower() for c in pk_columns]
-    bad = [c for c in cols_lower if not _PK_IDENT_RE.match(c)]
+    bad = [c for c in cols_lower if not _PK_IDENT_RE.fullmatch(c)]  # fullmatch: reject trailing-newline tricks
     if bad:
         raise ValueError(f"invalid PK column identifier(s): {', '.join(bad)}")
     cols = ", ".join(f'"{c}"' for c in cols_lower)
