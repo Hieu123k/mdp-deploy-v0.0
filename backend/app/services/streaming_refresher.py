@@ -51,8 +51,10 @@ def _acquire_singleton() -> Any | None:
 
 async def _loop(stop_event: asyncio.Event) -> None:
     _status.update(running=True)
-    interval = max(15, int(settings.streaming_interval or 60))
+    # Idle tick (no enabled table): how often to re-check if a table got enabled.
+    idle_interval = max(2, int(settings.streaming_interval or 60))
     while not stop_event.is_set():
+        interval = idle_interval
         try:
             # Master kill-switch (default ON): only skip work if ops explicitly disabled streaming.
             # Otherwise the per-table `enabled` flag (run_all_due) is the sole control.
@@ -63,6 +65,11 @@ async def _loop(stop_event: asyncio.Event) -> None:
                 _status.update(last_result=result)
                 if result.get("ran"):
                     logger.info("streaming poll cycle: %s", result)
+                # The loop sleeps exactly the smallest enabled per-table interval → the Settings
+                # "Interval (s)" value is the single, real cadence (no fixed 60s tick on top).
+                nxt = result.get("next_interval")
+                if nxt:
+                    interval = max(2, int(nxt))
         except Exception as exc:  # pragma: no cover - the cycle must never kill the task
             _status.update(last_result={"error": str(exc)})
             logger.warning("streaming poll cycle failed: %s", exc)

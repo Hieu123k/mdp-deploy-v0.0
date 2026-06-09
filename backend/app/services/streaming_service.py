@@ -296,16 +296,27 @@ def _finish(
     return payload
 
 
+# Absolute floor (seconds) for the per-table interval — the Settings "Interval (s)" field is the
+# single, real control (honoured exactly down to this floor); this just stops the loop busy-spinning.
+MIN_INTERVAL = 2
+
+
 def run_all_due(db: Session) -> dict[str, Any]:
-    """Run a cycle for every enabled config that is due (poll-loop entry point)."""
+    """Run a cycle for every enabled config that is due, and report the sleep the poll loop should
+    use next = the smallest enabled ``poll_interval_sec`` (so the per-table Interval set on the UI
+    is the one and only cadence — no separate loop-tick or 30s floor). poll-loop entry point."""
     now = datetime.now(timezone.utc)
     results: list[dict[str, Any]] = []
-    for cfg in db.scalars(select(StreamingConfig).where(StreamingConfig.enabled.is_(True))).all():
+    enabled = db.scalars(select(StreamingConfig).where(StreamingConfig.enabled.is_(True))).all()
+    for cfg in enabled:
+        interval = max(MIN_INTERVAL, int(cfg.poll_interval_sec or 60))
         if cfg.last_run_at is not None:
             last = cfg.last_run_at
             if last.tzinfo is None:
                 last = last.replace(tzinfo=timezone.utc)
-            if (now - last).total_seconds() < max(30, cfg.poll_interval_sec or 300):
+            if (now - last).total_seconds() < interval:
                 continue  # not due yet
         results.append(run_cycle(db, cfg))
-    return {"ran": len(results), "results": results}
+    intervals = [max(MIN_INTERVAL, int(c.poll_interval_sec or 60)) for c in enabled]
+    next_interval = min(intervals) if intervals else None
+    return {"ran": len(results), "results": results, "next_interval": next_interval}
