@@ -5,6 +5,7 @@ from app.models.migration import MigrationJob, MigrationRun, MigrationValidation
 from app.models.source_count import Ora2pgSourceCount
 from app.models.transaction import Transaction
 from app.models.user import User
+from app.models.user_preferences import UserPreference
 
 __all__ = [
     "ApiKey",
@@ -16,4 +17,5 @@ __all__ = [
     "Ora2pgSourceCount",
     "Transaction",
     "User",
+    "UserPreference",
 ]

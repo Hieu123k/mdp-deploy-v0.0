@@ -37,8 +37,7 @@ class Ora2pgTable:
 _CATALOG_PATH = Path(__file__).with_name("jde_migrate_tables.json")
 
 
-def _load_catalog() -> list[Ora2pgTable]:
-    data = json.loads(_CATALOG_PATH.read_text(encoding="utf-8"))
+def _rows_to_tables(rows: list[dict]) -> list[Ora2pgTable]:
     return [
         Ora2pgTable(
             table=row["source_view"],
@@ -46,8 +45,28 @@ def _load_catalog() -> list[Ora2pgTable]:
             module=row["module"],
             ts_col=row.get("ts_col"),
         )
-        for row in data["tables"]
+        for row in rows
     ]
+
+
+def _load_catalog() -> list[Ora2pgTable]:
+    data = json.loads(_CATALOG_PATH.read_text(encoding="utf-8"))
+    tables = _rows_to_tables(data["tables"])
+
+    # Optional environment-specific extra catalog (e.g. sandbox test fixtures) — appended at
+    # import time, never written into the repo catalog. Unknown/missing file = built-in only.
+    extra_path = (settings.ora2pg_extra_catalog or "").strip()
+    if extra_path and Path(extra_path).is_file():
+        try:
+            extra = json.loads(Path(extra_path).read_text(encoding="utf-8"))
+            known = {t.table.upper() for t in tables}
+            for t in _rows_to_tables(extra.get("tables", [])):
+                if t.table.upper() not in known:
+                    tables.append(t)
+                    known.add(t.table.upper())
+        except Exception:  # a malformed extra catalog must never break startup
+            pass
+    return tables
 
 
 MIGRATABLE_TABLES: list[Ora2pgTable] = _load_catalog()

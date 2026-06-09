@@ -5,9 +5,9 @@ type Variant = "primary" | "secondary" | "ghost" | "destructive";
 type Size = "sm" | "md";
 
 const VARIANTS: Record<Variant, string> = {
-  // primary: nền brand, chữ trắng
+  // primary: brand background, white text
   primary: "bg-brand text-brand-foreground hover:bg-brand-600 focus-visible:ring-brand",
-  // secondary: viền neutral-300
+  // secondary: neutral-300 border
   secondary:
     "bg-white text-neutral-800 border border-neutral-300 hover:bg-neutral-50",
   ghost: "bg-transparent text-neutral-700 hover:bg-neutral-100",

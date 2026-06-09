@@ -6,7 +6,7 @@ export interface InputProps extends InputHTMLAttributes<HTMLInputElement> {
   hint?: ReactNode;
 }
 
-/** Input chuẩn — placeholder LÀM MỜ (neutral-400) theo MoM #4 (xem globals.css). */
+/** Standard Input — placeholder DIMMED (neutral-400) per MoM #4 (see globals.css). */
 export function Input({ label, hint, className, id, ...props }: InputProps) {
   return (
     <label className="block">

@@ -1,7 +1,7 @@
 "use client";
 
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { CheckCircle2, Database, Download, Play, RefreshCw, Terminal } from "lucide-react";
+import { CheckCircle2, Database, Download, ListChecks, Play, RefreshCw, Terminal } from "lucide-react";
 import { Badge, type BadgeTone } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card, CardBody, CardHeader } from "@/components/ui/Card";
@@ -19,9 +19,12 @@ import {
   ora2pgStart,
   ora2pgStreamRun,
   ora2pgVerify,
+  verifyBatch,
+  verifyBatchStatus,
   type Ora2pgInfo,
   type Ora2pgProgress,
   type Ora2pgTable,
+  type VerifyBatchTable,
 } from "@/lib/api";
 
 function fmtInt(n: number | null | undefined): string {
@@ -52,6 +55,19 @@ function statusTone(status?: string): BadgeTone {
   }
 }
 
+function batchQueueTone(status?: string): BadgeTone {
+  switch (status) {
+    case "done":
+      return "success";
+    case "error":
+      return "danger";
+    case "running":
+      return "info";
+    default:
+      return "neutral"; // queued
+  }
+}
+
 function validationTone(status?: string | null): BadgeTone {
   switch (status) {
     case "MATCH":
@@ -68,9 +84,9 @@ function validationTone(status?: string | null): BadgeTone {
 function verdictLabel(v?: string | null): string {
   switch (v) {
     case "ESTIMATE":
-      return "≈ ước tính";
+      return "≈ estimate";
     case "PENDING":
-      return "chờ Verify";
+      return "Awaiting Verify";
     default:
       return v || "—";
   }
@@ -98,6 +114,12 @@ export function Ora2pgMigrationDashboard() {
 
   const [verifying, setVerifying] = useState<string | null>(null);
 
+  // Multi-Verify: selected tables + the active sequential batch's per-table queue status.
+  const [verifySel, setVerifySel] = useState<Set<string>>(new Set());
+  const [batchStatus, setBatchStatus] = useState<Record<string, VerifyBatchTable>>({});
+  const [batchRunning, setBatchRunning] = useState(false);
+  const batchPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
   const loadTables = useCallback(async () => {
     try {
       const r = await ora2pgListTables();
@@ -124,6 +146,54 @@ export function Ora2pgMigrationDashboard() {
     [loadTables],
   );
 
+  const toggleVerifySel = useCallback((table: string) => {
+    setVerifySel((cur) => {
+      const next = new Set(cur);
+      if (next.has(table)) next.delete(table);
+      else next.add(table);
+      return next;
+    });
+  }, []);
+
+  const toggleSelectAll = useCallback(() => {
+    setVerifySel((cur) => (cur.size === tables.length ? new Set() : new Set(tables.map((t) => t.table))));
+  }, [tables]);
+
+  const stopBatchPoll = useCallback(() => {
+    if (batchPollRef.current) {
+      clearInterval(batchPollRef.current);
+      batchPollRef.current = null;
+    }
+  }, []);
+
+  const onVerifySelected = useCallback(async () => {
+    const sel = Array.from(verifySel);
+    if (sel.length === 0) return;
+    setError(null);
+    setBatchRunning(true);
+    setBatchStatus(Object.fromEntries(sel.map((t) => [t, { status: "queued" as const }])));
+    try {
+      const { batch_id } = await verifyBatch(sel);
+      stopBatchPoll();
+      batchPollRef.current = setInterval(async () => {
+        try {
+          const st = await verifyBatchStatus(batch_id);
+          setBatchStatus(st.tables);
+          if (st.finished) {
+            stopBatchPoll();
+            setBatchRunning(false);
+            await loadTables(); // refresh verdicts / counts after the batch completes
+          }
+        } catch {
+          /* ignore transient poll errors */
+        }
+      }, 1000);
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Verify-selected failed");
+      setBatchRunning(false);
+    }
+  }, [verifySel, loadTables, stopBatchPoll]);
+
   const onDownloadLog = useCallback(async (format: "json" | "csv") => {
     try {
       await ora2pgDownloadReconciliation(format);
@@ -138,6 +208,7 @@ export function Ora2pgMigrationDashboard() {
     return () => {
       abortRef.current?.();
       if (pollRef.current) clearInterval(pollRef.current);
+      if (batchPollRef.current) clearInterval(batchPollRef.current);
     };
   }, [loadTables]);
 
@@ -408,6 +479,16 @@ export function Ora2pgMigrationDashboard() {
               Target table status &amp; reconciliation (mdp_staging)
             </h4>
             <div className="flex items-center gap-2">
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={onVerifySelected}
+                disabled={batchRunning || verifySel.size === 0}
+                title="Verify the ticked tables — runs in the background, one at a time"
+              >
+                <ListChecks size={14} />{" "}
+                {batchRunning ? "Verifying…" : `Verify selected${verifySel.size ? ` (${verifySel.size})` : ""}`}
+              </Button>
               <Button variant="ghost" size="sm" onClick={() => onDownloadLog("csv")}>
                 <Download size={14} /> Log .csv
               </Button>
@@ -419,6 +500,17 @@ export function Ora2pgMigrationDashboard() {
           <Table>
             <THead>
               <TR>
+                <TH>
+                  <input
+                    type="checkbox"
+                    aria-label="Select all"
+                    checked={tables.length > 0 && verifySel.size === tables.length}
+                    ref={(el) => {
+                      if (el) el.indeterminate = verifySel.size > 0 && verifySel.size < tables.length;
+                    }}
+                    onChange={toggleSelectAll}
+                  />
+                </TH>
                 <TH>Module</TH>
                 <TH>Table</TH>
                 <TH>Target</TH>
@@ -435,6 +527,14 @@ export function Ora2pgMigrationDashboard() {
               {tables.map((t) => (
                 <Fragment key={t.table}>
                 <TR>
+                  <TD>
+                    <input
+                      type="checkbox"
+                      aria-label={`Select ${t.table}`}
+                      checked={verifySel.has(t.table)}
+                      onChange={() => toggleVerifySel(t.table)}
+                    />
+                  </TD>
                   <TD className="text-neutral-500">{t.module}</TD>
                   <TD className="font-medium text-neutral-800">
                     {t.table}
@@ -473,11 +573,18 @@ export function Ora2pgMigrationDashboard() {
                   </TD>
                   <TD className="text-neutral-500">{fmtDur(t.last_run_duration_sec)}</TD>
                   <TD>
-                    {t.source_verdict ? (
-                      <Badge tone={validationTone(t.source_verdict)}>{verdictLabel(t.source_verdict)}</Badge>
-                    ) : (
-                      <span className="text-neutral-400">—</span>
-                    )}
+                    <div className="flex flex-col items-start gap-1">
+                      {t.source_verdict ? (
+                        <Badge tone={validationTone(t.source_verdict)}>{verdictLabel(t.source_verdict)}</Badge>
+                      ) : (
+                        <span className="text-neutral-400">—</span>
+                      )}
+                      {batchStatus[t.table] && (
+                        <Badge tone={batchQueueTone(batchStatus[t.table].status)}>
+                          {batchStatus[t.table].status}
+                        </Badge>
+                      )}
+                    </div>
                   </TD>
                   <TD>
                     {t.last_run_status ? (
@@ -516,7 +623,7 @@ export function Ora2pgMigrationDashboard() {
                 </TR>
                 {activeTable === t.table && progress && (
                   <TR>
-                    <TD colSpan={10} className="bg-brand/5">
+                    <TD colSpan={11} className="bg-brand/5">
                       <div className="flex items-center gap-3 px-1 py-1">
                         <Badge tone={statusTone(progress.status)}>
                           {progress.status}

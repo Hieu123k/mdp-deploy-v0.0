@@ -1,4 +1,5 @@
 import uuid
+from collections.abc import Callable
 from typing import Annotated
 
 from fastapi import Depends, Header, HTTPException, status
@@ -53,6 +54,29 @@ def get_current_user(
         )
 
     return user
+
+
+def require_role(*roles: str) -> Callable[..., User]:
+    """Dependency factory → 403 unless ``current_user.role`` is in ``roles``.
+
+    RBAC is enforced server-side: the role is resolved from the DB via ``get_current_user``
+    (the JWT carries only the subject), so hiding a tab on the front-end is never the only
+    guard. Returns the authenticated ``User`` so routes can still read ``current_user``.
+    """
+    allowed = set(roles)
+
+    def _checker(current_user: Annotated[User, Depends(get_current_user)]) -> User:
+        if current_user.role not in allowed:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Requires role: {', '.join(sorted(allowed))}",
+            )
+        return current_user
+
+    return _checker
+
+
+require_admin = require_role("admin")
 
 
 def get_request_auth_context(

@@ -11,6 +11,7 @@ import {
   UserRound,
   Palette,
   Users,
+  Settings,
   type LucideIcon,
 } from "lucide-react";
 
@@ -34,6 +35,7 @@ export const NAV_ITEMS: NavItem[] = [
   { href: "/migration-jobs", label: "Migration Jobs", desc: "ora2pg tracking", icon: ArrowRightLeft },
   { href: "/jde-demo", label: "JDE Demo Flow", desc: "Guided UAT", icon: Workflow },
   { href: "/users", label: "Users", desc: "Accounts & roles", icon: Users, adminOnly: true },
+  { href: "/settings", label: "Settings", desc: "Tabs, roles & theme", icon: Settings, adminOnly: true },
   { href: "/profile", label: "Profile", desc: "Sign-in & identity", icon: UserRound },
 ];
 

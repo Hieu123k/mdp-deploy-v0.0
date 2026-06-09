@@ -4,7 +4,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user
+from app.api.deps import require_admin
 from app.db.session import get_db
 from app.models.user import User
 from app.schemas.user import UserCreate, UserRead, UserUpdate
@@ -19,10 +19,12 @@ from app.services.user_service import (
 )
 
 
+# User management is admin-only (RBAC BE-enforce): non-admins get 403 on every route here,
+# not merely a hidden sidebar item.
 router = APIRouter(
     prefix="/users",
     tags=["users"],
-    dependencies=[Depends(get_current_user)],
+    dependencies=[Depends(require_admin)],
 )
 
 

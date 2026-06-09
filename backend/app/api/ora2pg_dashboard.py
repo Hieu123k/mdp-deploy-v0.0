@@ -16,6 +16,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import Response, StreamingResponse
+from pydantic import BaseModel
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
@@ -42,6 +43,7 @@ from app.services.ora2pg_runner import (
     start_repair,
     start_run,
 )
+from app.services.verify_service import enqueue_batch, get_batch_status, perform_verify
 
 DASHBOARD_VERSION = "v0.0"
 
@@ -286,44 +288,42 @@ def verify_table(
     table = get_table(table_name)
     if table is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown table")
-    job = db.scalar(select(MigrationJob).where(MigrationJob.name == _job_name(table.target_table)))
-    last = _latest_run(db, job.id) if job else None
+    return perform_verify(db, table)
 
-    target_rows = _count_table(db, table.target_table)  # exact COUNT (SAVEPOINT-guarded)
-    cache_row = verify_exact(db, table)  # exact Oracle source -> cache (or keeps prior, stale)
-    verdict = source_verdict(cache_row, target_rows)
-    src = cache_row.source_row_count if (cache_row and cache_row.status == "ok") else None
-    missed = (src - target_rows) if (src is not None and target_rows is not None) else None
 
-    # Record the recon result on the last run ONLY when official (exact MATCH/MISMATCH).
-    if last is not None and verdict in {"MATCH", "MISMATCH"}:
-        last.target_row_count = target_rows
-        last.source_row_count = src
-        last.validation_status = verdict
-        db.add(last)
-        db.add(MigrationValidation(
-            migration_run_id=last.id,
-            check_name="verify_target_row_count",
-            source_value=str(src) if src is not None else None,
-            target_value=str(target_rows) if target_rows is not None else None,
-            status="pass" if verdict == "MATCH" else "fail",
-            message=f"On-demand exact verify: target={target_rows}, source={src}, missed={missed}",
-        ))
-        db.commit()
+class VerifyBatchRequest(BaseModel):
+    tables: list[str]
 
+
+@router.post("/verify-batch", status_code=status.HTTP_202_ACCEPTED)
+def verify_batch(
+    payload: VerifyBatchRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> dict[str, Any]:
+    """Queue many tables for exact-verify. Every table (single or batched) runs through ONE global
+    worker that processes them **sequentially** — never two exact COUNTs at once. No cap on how
+    many tables are selected; extras just wait their turn. Unknown tables are recorded as ``error``
+    and the queue continues. Poll ``GET /ora2pg/verify-batch/{batch_id}`` for per-table status."""
+    tables = [t for t in (payload.tables or []) if t and t.strip()]
+    if not tables:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No tables selected")
+    batch_id = enqueue_batch(tables)
     return {
-        "table": table.table,
-        "target_table": table.target_table,
-        "target_rows": target_rows,
-        "source_count": src,
-        "source_count_mode": cache_row.count_mode if cache_row else None,
-        "source_stale": (cache_row.status != "ok") if cache_row else True,
-        "missed": missed,
-        "source_verdict": verdict,
-        "source_available": src is not None,
-        "last_run_id": str(last.id) if last else None,
-        "message": "Exact Oracle source count runs on .63; off-Oracle it stays ESTIMATE/stale.",
+        "batch_id": batch_id,
+        "queued": tables,
+        "status_url": f"/ora2pg/verify-batch/{batch_id}",
     }
+
+
+@router.get("/verify-batch/{batch_id}")
+def verify_batch_status(
+    batch_id: str,
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> dict[str, Any]:
+    snap = get_batch_status(batch_id)
+    if snap is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown batch")
+    return snap
 
 
 @router.post("/tables/{table_name}/repair", status_code=status.HTTP_202_ACCEPTED)

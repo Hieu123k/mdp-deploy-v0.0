@@ -880,3 +880,103 @@ export function ora2pgStreamRun(
   })();
   return () => ctrl.abort();
 }
+
+// --- User preferences (theme + per-user nav/RBAC tab config) --------------------------------
+
+export type NavOverride = { visible?: boolean; label?: string; order?: number };
+export type NavConfig = Record<string, NavOverride>;
+export type Preferences = { user_id?: string; theme: string; nav_config: NavConfig };
+
+export const getMyPreferences = () => req<Preferences>("/preferences/me");
+export const updateMyPreferences = (body: { theme?: string; nav_config?: NavConfig }) =>
+  req<Preferences>("/preferences/me", { method: "PUT", body: JSON.stringify(body) });
+
+export type UserPreferenceRow = {
+  user_id: string;
+  username: string;
+  role: string;
+  is_active?: boolean;
+  theme: string;
+  nav_config: NavConfig;
+};
+export const listUserPreferences = () => req<{ users: UserPreferenceRow[] }>("/preferences/users");
+export const getUserPreferences = (userId: string) =>
+  req<UserPreferenceRow>(`/preferences/users/${userId}`);
+export const setUserPreferences = (
+  userId: string,
+  body: { theme?: string; nav_config?: NavConfig },
+) => req<UserPreferenceRow>(`/preferences/users/${userId}`, { method: "PUT", body: JSON.stringify(body) });
+
+// --- Multi-Verify (sequential queue) --------------------------------------------------------
+
+export type VerifyBatchTable = {
+  status: "queued" | "running" | "done" | "error";
+  verdict?: string | null;
+  target_rows?: number | null;
+  source_count?: number | null;
+  missed?: number | null;
+  error?: string | null;
+};
+export type VerifyBatchStatus = {
+  batch_id: string;
+  order: string[];
+  tables: Record<string, VerifyBatchTable>;
+  total: number;
+  completed: number;
+  finished: boolean;
+};
+
+export const verifyBatch = (tables: string[]) =>
+  req<{ batch_id: string; queued: string[]; status_url: string }>("/ora2pg/verify-batch", {
+    method: "POST",
+    body: JSON.stringify({ tables }),
+  });
+export const verifyBatchStatus = (batchId: string) =>
+  req<VerifyBatchStatus>(`/ora2pg/verify-batch/${batchId}`);
+
+// --- Streaming config (consume prompt-27 API; degrades to 404 if backend lacks it) ----------
+
+export type StreamingTable = {
+  source_view: string;
+  target_table: string;
+  label: string;
+  enabled: boolean;
+  ts_col: string | null;
+  ts_time_col: string | null;
+  granularity: string;
+  poll_interval_sec: number;
+  lookback_days: number;
+  last_watermark: string | null;
+  last_watermark_time: string | null;
+  last_run_at: string | null;
+  last_rows_added: number | null;
+  last_status: string | null;
+  has_ts_time_col: boolean;
+};
+export type StreamingStatus = {
+  loop: { enabled: boolean; running: boolean };
+  tables: StreamingTable[];
+};
+export type StreamingConfigUpdate = Partial<{
+  enabled: boolean;
+  granularity: string;
+  poll_interval_sec: number;
+  lookback_days: number;
+  ts_col: string;
+  ts_time_col: string;
+}>;
+export type StreamingRunResult = {
+  ok: boolean;
+  rows_added: number | null;
+  cursor: string | null;
+  error: string | null;
+};
+
+export const streamingStatus = () => req<StreamingStatus>("/streaming/status");
+export const streamingUpdateConfig = (table: string, body: StreamingConfigUpdate) =>
+  req<StreamingTable>(`/streaming/config/${encodeURIComponent(table)}`, {
+    method: "PUT",
+    body: JSON.stringify(body),
+  });
+export const streamingRunOnce = (table: string) =>
+  req<StreamingRunResult>(`/streaming/run-once/${encodeURIComponent(table)}`, { method: "POST" });

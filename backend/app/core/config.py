@@ -32,6 +32,10 @@ class Settings(BaseSettings):
     ora2pg_data_limit: int = 50000
     # Target schema in MDP's own postgres (design 1B: no separate DW, no FDW)
     ora2pg_target_schema: str = "mdp_staging"
+    # Optional path to an EXTRA catalog JSON (same shape as jde_migrate_tables.json) appended to
+    # the built-in table catalog at import time. Empty = built-in only. Used to register
+    # environment-specific tables (e.g. sandbox test fixtures) WITHOUT editing the repo catalog.
+    ora2pg_extra_catalog: str = ""
 
     # --- Source-count refresher (background estimate of Oracle source rows -> cache) ---
     # Default OFF; only turned on where Oracle is reachable (.63). The periodic loop only ever
