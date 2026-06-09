@@ -573,9 +573,6 @@ export function Ora2pgMigrationDashboard() {
                 <ListChecks size={14} />{" "}
                 {batchRunning ? "Verifying…" : `Verify selected${verifySel.size ? ` (${verifySel.size})` : ""}`}
               </Button>
-              <Button variant="ghost" size="sm" onClick={() => onDownloadLog("csv")}>
-                <Download size={14} /> Log .csv
-              </Button>
               <Button
                 variant="secondary"
                 size="sm"

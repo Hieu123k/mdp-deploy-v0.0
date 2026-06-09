@@ -214,10 +214,14 @@ def _pk_status(job: "MigrationJob | None", pk_columns, target_cols: set[str] | N
     cfg = (job.config or {}) if job else {}
     source = cfg.get("pk_source") or ("reference" if pk_columns else None)
     warnings: list[str] = []
-    if cfg.get("pk_name_match") is False:
-        warnings.append("table name differs from JDE vanilla — verify PK applies")
-    if cfg.get("pk_type") == "surrogate":
-        warnings.append("PK is a surrogate key (UKID) — verify it suits upsert")
+    # The pk_name_match / pk_type flags describe the REFERENCE-doc PK only. Once an admin has
+    # overridden (manual) or a scan replaced it (scanned), those reference facts no longer describe
+    # the live PK, so the warning would be stale/false — only surface them while source==reference.
+    if source == "reference":
+        if cfg.get("pk_name_match") is False:
+            warnings.append("table name differs from JDE vanilla — verify PK applies")
+        if cfg.get("pk_type") == "surrogate":
+            warnings.append("PK is a surrogate key (UKID) — verify it suits upsert")
     if pk_columns and target_cols:  # only when the target is migrated
         missing = [c for c in pk_columns if c not in target_cols]
         if missing:
@@ -622,13 +626,15 @@ def list_keys(db: Annotated[Session, Depends(get_db)]) -> dict[str, Any]:
 @router.post("/discover-keys")
 def discover_keys(
     db: Annotated[Session, Depends(get_db)],
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(require_admin)],
     table: str | None = None,
 ) -> dict[str, Any]:
     """Discover PK(s) from the Oracle unique index and persist onto MigrationJob.primary_key_columns
     (the canonical PK store) + sync into any streaming_config. ``table`` scans just that view (Scan
     PK per-table); omitted = scan all 40. Needs Oracle → real only where reachable; off-Oracle it
-    returns available=False (all pk null) without error, so the contract is still testable."""
+    returns available=False (all pk null) without error, so the contract is still testable.
+    Admin-only (mutates the canonical + streaming PK), and never overrides a manual PK
+    (manual > scanned > reference)."""
     if table is not None:
         one = get_table(table)
         if one is None:
@@ -638,6 +644,7 @@ def discover_keys(
         scan_list = MIGRATABLE_TABLES
     discovery = discover_oracle_keys(scan_list)
     persisted = 0
+    skipped_manual = 0
     if discovery.get("available"):
         for r in discovery["results"]:
             if not r.get("pk_columns"):
@@ -646,6 +653,9 @@ def discover_keys(
             if t is None:
                 continue
             job = _get_or_create_job(db, t)
+            if (job.config or {}).get("pk_source") == "manual":
+                skipped_manual += 1  # manual always wins — a scan must never clobber it
+                continue
             job.primary_key_columns = r["pk_columns"]
             job.config = {**(job.config or {}), "pk_source": "scanned"}
             db.add(job)
@@ -656,6 +666,7 @@ def discover_keys(
         "available": discovery.get("available", False),
         "message": discovery.get("message"),
         "persisted": persisted,
+        "skipped_manual": skipped_manual,
         "results": discovery.get("results", []),
     }
 
@@ -695,7 +706,7 @@ _PK_COL_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 
 
 def _validate_pk_identifiers(pk_columns: list[str]) -> None:
-    bad = [c for c in pk_columns if not _PK_COL_RE.match(c)]
+    bad = [c for c in pk_columns if not _PK_COL_RE.fullmatch(c)]  # fullmatch: reject trailing-newline tricks
     if bad:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -790,6 +801,21 @@ def set_primary_key(
                 detail=f"PK {pk} is NOT unique in {table.target_table} — pick a unique key (single or composite).",
             )
 
+    # Build the unique index FIRST when the target exists: the atomic CREATE UNIQUE INDEX is the
+    # definitive uniqueness gate (the GROUP BY probe above can miss when it errors transiently). If
+    # the build fails we persist NOTHING and return a hard 409 — so a non-unique PK never gets saved
+    # as canonical and the contract "non-unique → non-2xx" holds even when the probe is undeterminable.
+    index_rebuilt, index_error = (False, None)
+    if target_exists:
+        index_rebuilt, index_error = _rebuild_unique_index(table.target_table, pk)
+        if not index_rebuilt:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"PK {pk} could not be made UNIQUE in {table.target_table}: {index_error}",
+            )
+    else:
+        index_error = "target not migrated yet — index will be (re)built on next load/streaming cycle"
+
     # Persist canonical PK (pk_source=manual — overrides the reference default) + sync streaming.
     job = _get_or_create_job(db, table)
     job.primary_key_columns = pk
@@ -797,13 +823,6 @@ def set_primary_key(
     db.add(job)
     _sync_streaming_pk(db, table.table, pk)
     db.commit()
-
-    # Rebuild the unique index atomically (only possible once the target exists / is migrated).
-    index_rebuilt, index_error = (False, None)
-    if target_exists:
-        index_rebuilt, index_error = _rebuild_unique_index(table.target_table, pk)
-    else:
-        index_error = "target not migrated yet — index will be (re)built on next load/streaming cycle"
 
     return {
         "table": table.table,

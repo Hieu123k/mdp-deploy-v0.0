@@ -184,17 +184,19 @@ export function StreamingEditor() {
                       <TD>
                         <Input
                           type="number"
+                          min={2}
                           value={d.poll_interval_sec}
                           className="max-w-[6rem]"
-                          onChange={(e) => setDraft(t.source_view, { poll_interval_sec: Number(e.target.value) })}
+                          onChange={(e) => setDraft(t.source_view, { poll_interval_sec: Math.max(2, Number(e.target.value) || 2) })}
                         />
                       </TD>
                       <TD>
                         <Input
                           type="number"
+                          min={0}
                           value={d.lookback_days}
                           className="max-w-[5rem]"
-                          onChange={(e) => setDraft(t.source_view, { lookback_days: Number(e.target.value) })}
+                          onChange={(e) => setDraft(t.source_view, { lookback_days: Math.max(0, Number(e.target.value) || 0) })}
                         />
                       </TD>
                       <TD className="max-w-[16rem]">

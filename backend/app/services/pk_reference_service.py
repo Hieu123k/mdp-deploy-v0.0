@@ -48,7 +48,9 @@ def reference_pk(source_view: str) -> list[str] | None:
 def seed_reference_primary_keys(db: Session) -> int:
     """Idempotent seed: for every catalog table present in the reference, set the canonical PK +
     ``config.pk_source='reference'`` + reference flags, UNLESS the table already has a manual
-    override (``config.pk_source='manual'``) — manual always wins. Returns the number seeded."""
+    override OR a scanned (discovered) PK — priority is manual > scanned > reference, so re-seeding
+    on every boot must never silently revert a deliberately-set or empirically-discovered PK back to
+    the reference guess. Returns the number seeded."""
     from app.api.ora2pg_dashboard import _get_or_create_job  # lazy: avoid import cycle
 
     seeded = 0
@@ -58,8 +60,8 @@ def seed_reference_primary_keys(db: Session) -> int:
             continue
         job = _get_or_create_job(db, t)
         cfg = dict(job.config or {})
-        if cfg.get("pk_source") == "manual":
-            continue  # never override a manual PK
+        if cfg.get("pk_source") in ("manual", "scanned"):
+            continue  # manual/scanned always win — never revert a set PK to the reference default
         cfg.update({
             "pk_source": "reference",
             "pk_name_match": bool(ref.get("name_match")),
