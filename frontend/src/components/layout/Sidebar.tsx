@@ -60,10 +60,14 @@ export function Sidebar() {
           <NavLink key={item.href} item={item} active={isActive(item.href)} />
         ))}
 
-        <div className="my-3 border-t border-neutral-100 dark:border-neutral-800" />
-        {NAV_SECONDARY.map((item) => (
-          <NavLink key={item.href} item={item} active={isActive(item.href)} />
-        ))}
+        {NAV_SECONDARY.length > 0 && (
+          <>
+            <div className="my-3 border-t border-neutral-100 dark:border-neutral-800" />
+            {NAV_SECONDARY.map((item) => (
+              <NavLink key={item.href} item={item} active={isActive(item.href)} />
+            ))}
+          </>
+        )}
       </nav>
 
       {/* Footer — theme toggle + signed-in user + log out */}

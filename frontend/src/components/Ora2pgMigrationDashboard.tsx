@@ -1,21 +1,25 @@
 "use client";
 
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { CheckCircle2, Database, Download, ListChecks, Play, RefreshCw, Terminal } from "lucide-react";
+import { CheckCircle2, Database, Download, KeyRound, ListChecks, Play, RefreshCw, Terminal } from "lucide-react";
 import { Badge, type BadgeTone } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card, CardBody, CardHeader } from "@/components/ui/Card";
 import { Input } from "@/components/ui/Input";
 import { Select } from "@/components/ui/Select";
 import { Table, TBody, TD, TH, THead, TR } from "@/components/ui/Table";
+import { useAuth } from "@/components/auth/AuthProvider";
 import {
   ApiError,
   ora2pgConfigPreview,
+  ora2pgDiscoverKeys,
+  ora2pgDiscoverKeysTable,
   ora2pgDownloadReconciliation,
   ora2pgGetRun,
   ora2pgInfo,
   ora2pgListTables,
   ora2pgRepair,
+  ora2pgSetPrimaryKey,
   ora2pgStart,
   ora2pgStreamRun,
   ora2pgVerify,
@@ -120,6 +124,14 @@ export function Ora2pgMigrationDashboard() {
   const [batchRunning, setBatchRunning] = useState(false);
   const batchPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  // Primary-Key editor (admin) + Scan (discover-keys).
+  const { user } = useAuth();
+  const isAdmin = user?.role === "admin";
+  const [pkBusy, setPkBusy] = useState<string | null>(null);
+  const [pkEdit, setPkEdit] = useState<string | null>(null);
+  const [pkDraft, setPkDraft] = useState<string>("");
+  const [pkMsg, setPkMsg] = useState<string | null>(null);
+
   const loadTables = useCallback(async () => {
     try {
       const r = await ora2pgListTables();
@@ -129,6 +141,65 @@ export function Ora2pgMigrationDashboard() {
       setError(e instanceof ApiError ? e.message : "Failed to load tables");
     }
   }, []);
+
+  const pkCoverage = useMemo(
+    () => tables.filter((t) => t.pk_columns && t.pk_columns.length > 0).length,
+    [tables],
+  );
+
+  const onScanAllPk = useCallback(async () => {
+    setPkBusy("__all__");
+    setPkMsg(null);
+    try {
+      const r = await ora2pgDiscoverKeys();
+      setPkMsg(r.available ? `Scan PK: ${r.persisted} table(s) updated.` : `Scan PK: ${r.message ?? "Oracle unreachable"}`);
+      await loadTables();
+    } catch (e) {
+      setPkMsg(e instanceof ApiError ? e.message : "Scan PK failed");
+    } finally {
+      setPkBusy(null);
+    }
+  }, [loadTables]);
+
+  const onScanTablePk = useCallback(
+    async (table: string) => {
+      setPkBusy(table);
+      setPkMsg(null);
+      try {
+        const r = await ora2pgDiscoverKeysTable(table);
+        setPkMsg(r.available ? `${table}: PK ${r.persisted ? "updated" : "not found"}.` : `${table}: ${r.message ?? "Oracle unreachable"}`);
+        await loadTables();
+      } catch (e) {
+        setPkMsg(e instanceof ApiError ? e.message : "Scan failed");
+      } finally {
+        setPkBusy(null);
+      }
+    },
+    [loadTables],
+  );
+
+  const onSavePk = useCallback(
+    async (table: string) => {
+      const cols = pkDraft.split(",").map((c) => c.trim()).filter(Boolean);
+      if (cols.length === 0) {
+        setPkMsg("Enter at least one column (comma-separated)");
+        return;
+      }
+      setPkBusy(table);
+      setPkMsg(null);
+      try {
+        const r = await ora2pgSetPrimaryKey(table, cols);
+        setPkMsg(`${table}: ${r.message}`);
+        setPkEdit(null);
+        await loadTables();
+      } catch (e) {
+        setPkMsg(e instanceof ApiError ? e.message : "Save PK failed");
+      } finally {
+        setPkBusy(null);
+      }
+    },
+    [pkDraft, loadTables],
+  );
 
   const onVerify = useCallback(
     async (table: string) => {
@@ -505,11 +576,24 @@ export function Ora2pgMigrationDashboard() {
               <Button variant="ghost" size="sm" onClick={() => onDownloadLog("csv")}>
                 <Download size={14} /> Log .csv
               </Button>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={onScanAllPk}
+                disabled={pkBusy !== null}
+                title="Discover primary keys (Oracle unique index) for all tables"
+              >
+                <KeyRound size={14} /> {pkBusy === "__all__" ? "Scanning…" : `Scan all PK (${pkCoverage}/${tables.length})`}
+              </Button>
+              <Button variant="ghost" size="sm" onClick={() => onDownloadLog("csv")}>
+                <Download size={14} /> Log .csv
+              </Button>
               <Button variant="ghost" size="sm" onClick={() => onDownloadLog("json")}>
                 <Download size={14} /> Log .json
               </Button>
             </div>
           </div>
+          {pkMsg && <p className="mb-2 text-xs text-neutral-600 dark:text-neutral-300">{pkMsg}</p>}
           <Table>
             <THead>
               <TR>
@@ -526,6 +610,7 @@ export function Ora2pgMigrationDashboard() {
                 </TH>
                 <TH>Module</TH>
                 <TH>Table</TH>
+                <TH>Primary Key</TH>
                 <TH>Target</TH>
                 <TH>Current rows</TH>
                 <TH>Source</TH>
@@ -549,12 +634,55 @@ export function Ora2pgMigrationDashboard() {
                     />
                   </TD>
                   <TD className="text-neutral-500">{t.module}</TD>
-                  <TD className="font-medium text-neutral-800">
-                    {t.table}
-                    {t.pk_columns && t.pk_columns.length > 0 && (
-                      <span className="ml-1.5" title={`PK: ${t.pk_columns.join(", ")}`}>
-                        <Badge tone="info">PK</Badge>
-                      </span>
+                  <TD className="font-medium text-neutral-800">{t.table}</TD>
+                  <TD>
+                    {pkEdit === t.table ? (
+                      <div className="flex items-center gap-1">
+                        <Input
+                          value={pkDraft}
+                          onChange={(e) => setPkDraft(e.target.value)}
+                          className="max-w-[11rem]"
+                          placeholder="gldoc, gldct"
+                        />
+                        <Button size="sm" disabled={pkBusy === t.table} onClick={() => onSavePk(t.table)}>
+                          {pkBusy === t.table ? "…" : "Save"}
+                        </Button>
+                        <Button size="sm" variant="ghost" onClick={() => setPkEdit(null)} title="Cancel">
+                          ✕
+                        </Button>
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-1.5">
+                        {t.pk_columns && t.pk_columns.length > 0 ? (
+                          <span className="font-mono text-xs text-neutral-700 dark:text-neutral-300">
+                            {t.pk_columns.join(", ")}
+                          </span>
+                        ) : (
+                          <Badge tone="neutral">null · not scanned</Badge>
+                        )}
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          disabled={pkBusy === t.table}
+                          onClick={() => onScanTablePk(t.table)}
+                          title="Scan PK (discover-keys)"
+                        >
+                          {pkBusy === t.table ? "…" : "Scan"}
+                        </Button>
+                        {isAdmin && (
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => {
+                              setPkEdit(t.table);
+                              setPkDraft((t.pk_columns ?? []).join(", "));
+                            }}
+                            title="Edit PK (admin)"
+                          >
+                            Edit
+                          </Button>
+                        )}
+                      </div>
                     )}
                   </TD>
                   <TD className="text-neutral-500">
@@ -636,7 +764,7 @@ export function Ora2pgMigrationDashboard() {
                 </TR>
                 {activeTable === t.table && progress && (
                   <TR>
-                    <TD colSpan={11} className="bg-brand/5">
+                    <TD colSpan={12} className="bg-brand/5">
                       <div className="flex items-center gap-3 px-1 py-1">
                         <Badge tone={statusTone(progress.status)}>
                           {progress.status}

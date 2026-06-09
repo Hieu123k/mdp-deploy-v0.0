@@ -817,6 +817,23 @@ export const ora2pgDiscoverKeys = () =>
     "/ora2pg/discover-keys",
     { method: "POST" },
   );
+export const ora2pgDiscoverKeysTable = (table: string) =>
+  req<{ available: boolean; message: string | null; persisted: number; results: unknown[] }>(
+    `/ora2pg/discover-keys?table=${encodeURIComponent(table)}`,
+    { method: "POST" },
+  );
+export type Ora2pgPkResult = {
+  table: string;
+  pk_columns: string[];
+  index_rebuilt: boolean;
+  index_error: string | null;
+  message: string;
+};
+export const ora2pgSetPrimaryKey = (table: string, pk_columns: string[]) =>
+  req<Ora2pgPkResult>(`/ora2pg/tables/${encodeURIComponent(table)}/primary-key`, {
+    method: "PUT",
+    body: JSON.stringify({ pk_columns }),
+  });
 
 /** Download the reconciliation log (json|csv) via an authed fetch + blob. */
 export async function ora2pgDownloadReconciliation(format: "json" | "csv"): Promise<void> {
@@ -951,6 +968,7 @@ export type StreamingTable = {
   last_run_at: string | null;
   last_rows_added: number | null;
   last_status: string | null;
+  last_error: string | null;
   has_ts_time_col: boolean;
 };
 export type StreamingStatus = {

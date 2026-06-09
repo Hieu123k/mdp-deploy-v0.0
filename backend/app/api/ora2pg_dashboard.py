@@ -20,7 +20,7 @@ from pydantic import BaseModel
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, require_admin
 from app.core.config import settings
 from app.core.ora2pg_catalog import (
     MIGRATABLE_TABLES,
@@ -28,7 +28,7 @@ from app.core.ora2pg_catalog import (
     get_table,
     redact_conf,
 )
-from app.db.session import get_db
+from app.db.session import engine, get_db
 from app.models.migration import MigrationJob, MigrationRun, MigrationValidation
 from app.models.source_count import Ora2pgSourceCount
 from app.models.user import User
@@ -588,22 +588,32 @@ def list_keys(db: Annotated[Session, Depends(get_db)]) -> dict[str, Any]:
 def discover_keys(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
+    table: str | None = None,
 ) -> dict[str, Any]:
-    """Discover each table's PK from the Oracle unique index and persist it onto the table's
-    MigrationJob.primary_key_columns. Needs Oracle → real only on `.63`; on the VPS it returns
-    available=False (all pk null) without error, so the contract is still testable."""
-    discovery = discover_oracle_keys(MIGRATABLE_TABLES)
+    """Discover PK(s) from the Oracle unique index and persist onto MigrationJob.primary_key_columns
+    (the canonical PK store) + sync into any streaming_config. ``table`` scans just that view (Scan
+    PK per-table); omitted = scan all 40. Needs Oracle → real only where reachable; off-Oracle it
+    returns available=False (all pk null) without error, so the contract is still testable."""
+    if table is not None:
+        one = get_table(table)
+        if one is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown table")
+        scan_list = [one]
+    else:
+        scan_list = MIGRATABLE_TABLES
+    discovery = discover_oracle_keys(scan_list)
     persisted = 0
     if discovery.get("available"):
         for r in discovery["results"]:
             if not r.get("pk_columns"):
                 continue
-            table = get_table(r["source_view"])
-            if table is None:
+            t = get_table(r["source_view"])
+            if t is None:
                 continue
-            job = _get_or_create_job(db, table)
+            job = _get_or_create_job(db, t)
             job.primary_key_columns = r["pk_columns"]
             db.add(job)
+            _sync_streaming_pk(db, t.table, r["pk_columns"])
             persisted += 1
         db.commit()
     return {
@@ -611,4 +621,107 @@ def discover_keys(
         "message": discovery.get("message"),
         "persisted": persisted,
         "results": discovery.get("results", []),
+    }
+
+
+def _sync_streaming_pk(db: Session, source_view: str, pk_columns: list[str] | None) -> None:
+    """Keep streaming_configs.primary_key_columns in sync with the canonical migration_jobs PK, so
+    migrate (Repair upsert) and streaming (upsert) use ONE primary key. No-op where the streaming
+    feature is absent (e.g. the standalone ui-bundle backend)."""
+    try:
+        from app.models.streaming_config import StreamingConfig
+
+        cfg = db.scalar(select(StreamingConfig).where(StreamingConfig.source_view == source_view.upper()))
+        if cfg is not None:
+            cfg.primary_key_columns = pk_columns
+            db.add(cfg)
+    except Exception:  # streaming model not present / any error → canonical job PK still stands
+        pass
+
+
+def _target_columns(target_table: str) -> set[str]:
+    """Lower-cased column names of the target staging table (for PK validation). Empty if missing."""
+    try:
+        with engine.connect() as conn:
+            rows = conn.exec_driver_sql(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = %s AND table_name = %s",
+                (settings.ora2pg_target_schema, target_table),
+            ).fetchall()
+        return {r[0].lower() for r in rows}
+    except Exception:
+        return set()
+
+
+def _rebuild_unique_index(target_table: str, pk_columns: list[str]) -> tuple[bool, str | None]:
+    """DROP the target's PK unique index and re-CREATE it on ``pk_columns`` so a changed PK takes
+    effect. Returns (ok, error). A non-unique PK makes CREATE UNIQUE INDEX fail → (False, message)
+    WITHOUT raising (the caller surfaces it; the streaming cycle for that table then reports
+    status=error rather than crashing)."""
+    schema = settings.ora2pg_target_schema
+    idx = f"ux_{target_table}_pk"[:63]
+    cols = ", ".join(f'"{c.lower()}"' for c in pk_columns)
+    try:
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            raw = conn.connection
+            with raw.cursor() as cur:
+                cur.execute(f'DROP INDEX IF EXISTS "{schema}"."{idx}"')
+                cur.execute(f'CREATE UNIQUE INDEX "{idx}" ON "{schema}"."{target_table}" ({cols})')
+        return True, None
+    except Exception as exc:
+        return False, str(exc).splitlines()[0][:300]
+
+
+class PrimaryKeyUpdate(BaseModel):
+    pk_columns: list[str]
+
+
+@router.put("/tables/{table_name}/primary-key")
+def set_primary_key(
+    table_name: str,
+    payload: PrimaryKeyUpdate,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_admin)],
+) -> dict[str, Any]:
+    """Admin-only: set a table's primary key (single or composite) → canonical
+    ``migration_jobs.primary_key_columns`` (synced to streaming_config) and rebuild the target's
+    UNIQUE index. Validates the columns exist in the migrated target; a non-unique PK rebuilds with
+    an error reported (not a crash)."""
+    table = get_table(table_name)
+    if table is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown table")
+    pk = [c.strip().lower() for c in (payload.pk_columns or []) if c and c.strip()]
+    if not pk:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="pk_columns must not be empty")
+
+    target_cols = _target_columns(table.target_table)
+    target_exists = bool(target_cols)
+    if target_exists:
+        unknown = [c for c in pk if c not in target_cols]
+        if unknown:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Column(s) not in {table.target_table}: {', '.join(unknown)}",
+            )
+
+    # Persist canonical PK + sync streaming.
+    job = _get_or_create_job(db, table)
+    job.primary_key_columns = pk
+    db.add(job)
+    _sync_streaming_pk(db, table.table, pk)
+    db.commit()
+
+    # Rebuild the unique index (only possible once the target exists / is migrated).
+    index_rebuilt, index_error = (False, None)
+    if target_exists:
+        index_rebuilt, index_error = _rebuild_unique_index(table.target_table, pk)
+    else:
+        index_error = "target not migrated yet — index will be (re)built on next load/streaming cycle"
+
+    return {
+        "table": table.table,
+        "pk_columns": pk,
+        "index_rebuilt": index_rebuilt,
+        "index_error": index_error,
+        "message": "PK saved." + ("" if index_rebuilt else f" Index not unique-built: {index_error}"),
     }
