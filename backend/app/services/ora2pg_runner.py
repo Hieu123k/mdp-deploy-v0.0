@@ -210,13 +210,21 @@ def _write_conf(conf: str) -> None:
         fh.write(conf)
 
 
+_PK_IDENT_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+
+
 def _ensure_unique_index(schema: str, target: str, pk_columns: list[str]) -> None:
     """Create a UNIQUE index on the target PK columns (idempotent). Required for PK-repair:
     `INSERT … ON CONFLICT DO NOTHING` only skips existing rows when a unique constraint/index
-    backs the conflict. Column names are catalog/discovery values (not user input)."""
+    backs the conflict. PK columns may originate from the admin PK editor, so every name is
+    identifier-validated before it is interpolated into the DDL (defence against injection)."""
     if not pk_columns:
         return
-    cols = ", ".join(f'"{c.lower()}"' for c in pk_columns)
+    cols_lower = [c.lower() for c in pk_columns]
+    bad = [c for c in cols_lower if not _PK_IDENT_RE.match(c)]
+    if bad:
+        raise ValueError(f"invalid PK column identifier(s): {', '.join(bad)}")
+    cols = ", ".join(f'"{c}"' for c in cols_lower)
     idx = f"ux_{target}_pk"[:63]
     with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
         raw = conn.connection
