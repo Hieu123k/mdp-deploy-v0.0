@@ -115,15 +115,31 @@ export default function SettingsPage() {
   };
 
   // ---- Streaming config (consume prompt-27 API) ----
+  // Edits go to a local draft per table; nothing is saved until "Apply" is clicked.
+  type StreamDraft = { enabled: boolean; granularity: string; poll_interval_sec: number; lookback_days: number };
   const [streaming, setStreaming] = useState<StreamingTable[] | null>(null);
   const [streamingAvail, setStreamingAvail] = useState<boolean>(true);
   const [streamMsg, setStreamMsg] = useState<string | null>(null);
   const [streamBusy, setStreamBusy] = useState<string | null>(null);
+  const [drafts, setDrafts] = useState<Record<string, StreamDraft>>({});
 
   const loadStreaming = useCallback(async () => {
     try {
       const s = await streamingStatus();
       setStreaming(s.tables);
+      setDrafts(
+        Object.fromEntries(
+          s.tables.map((t) => [
+            t.source_view,
+            {
+              enabled: t.enabled,
+              granularity: t.granularity,
+              poll_interval_sec: t.poll_interval_sec,
+              lookback_days: t.lookback_days,
+            },
+          ]),
+        ),
+      );
       setStreamingAvail(true);
     } catch {
       setStreamingAvail(false);
@@ -134,17 +150,46 @@ export default function SettingsPage() {
     void loadStreaming();
   }, [loadStreaming]);
 
-  const patchStreaming = async (
-    t: StreamingTable,
-    body: Parameters<typeof streamingUpdateConfig>[1],
-  ) => {
+  const draftOf = (t: StreamingTable): StreamDraft =>
+    drafts[t.source_view] ?? {
+      enabled: t.enabled,
+      granularity: t.granularity,
+      poll_interval_sec: t.poll_interval_sec,
+      lookback_days: t.lookback_days,
+    };
+
+  const setDraft = (view: string, partial: Partial<StreamDraft>) =>
+    setDrafts((d) => ({ ...d, [view]: { ...d[view], ...partial } }));
+
+  const isDirty = (t: StreamingTable): boolean => {
+    const d = drafts[t.source_view];
+    return (
+      !!d &&
+      (d.enabled !== t.enabled ||
+        d.granularity !== t.granularity ||
+        d.poll_interval_sec !== t.poll_interval_sec ||
+        d.lookback_days !== t.lookback_days)
+    );
+  };
+
+  const applyStreaming = async (t: StreamingTable) => {
+    const d = draftOf(t);
     setStreamBusy(t.source_view);
     setStreamMsg(null);
     try {
-      await streamingUpdateConfig(t.source_view, body);
+      await streamingUpdateConfig(t.source_view, {
+        enabled: d.enabled,
+        granularity: d.granularity,
+        poll_interval_sec: d.poll_interval_sec,
+        lookback_days: d.lookback_days,
+      });
+      setStreamMsg(
+        `${t.source_view}: applied — ${d.enabled ? "enabled" : "disabled"}, ${d.granularity}, every ${d.poll_interval_sec}s. ` +
+          (d.enabled ? "The background loop picks it up within one tick." : ""),
+      );
       await loadStreaming();
     } catch (e) {
-      setStreamMsg(e instanceof ApiError ? e.message : "Update failed");
+      setStreamMsg(e instanceof ApiError ? e.message : "Apply failed");
     } finally {
       setStreamBusy(null);
     }
@@ -306,22 +351,28 @@ export default function SettingsPage() {
                   </TR>
                 </THead>
                 <TBody>
-                  {(streaming ?? []).map((t) => (
+                  {(streaming ?? []).map((t) => {
+                    const d = draftOf(t);
+                    const dirty = isDirty(t);
+                    return (
                     <TR key={t.source_view}>
-                      <TD className="font-medium">{t.source_view}</TD>
+                      <TD className="font-medium">
+                        {t.source_view}
+                        {dirty ? <span className="ml-1.5 text-xs text-warning">unsaved</span> : null}
+                      </TD>
                       <TD>
                         <input
                           type="checkbox"
-                          checked={t.enabled}
+                          checked={d.enabled}
                           disabled={streamBusy === t.source_view}
-                          onChange={(e) => void patchStreaming(t, { enabled: e.target.checked })}
+                          onChange={(e) => setDraft(t.source_view, { enabled: e.target.checked })}
                         />
                       </TD>
                       <TD>
                         <Select
-                          value={t.granularity}
+                          value={d.granularity}
                           disabled={streamBusy === t.source_view}
-                          onChange={(e) => void patchStreaming(t, { granularity: e.target.value })}
+                          onChange={(e) => setDraft(t.source_view, { granularity: e.target.value })}
                         >
                           <option value="day">day</option>
                           <option value="timestamp" disabled={!t.has_ts_time_col}>
@@ -332,23 +383,17 @@ export default function SettingsPage() {
                       <TD>
                         <Input
                           type="number"
-                          defaultValue={t.poll_interval_sec}
+                          value={d.poll_interval_sec}
                           className="max-w-[6rem]"
-                          onBlur={(e) => {
-                            const v = Number(e.target.value);
-                            if (v && v !== t.poll_interval_sec) void patchStreaming(t, { poll_interval_sec: v });
-                          }}
+                          onChange={(e) => setDraft(t.source_view, { poll_interval_sec: Number(e.target.value) })}
                         />
                       </TD>
                       <TD>
                         <Input
                           type="number"
-                          defaultValue={t.lookback_days}
+                          value={d.lookback_days}
                           className="max-w-[5rem]"
-                          onBlur={(e) => {
-                            const v = Number(e.target.value);
-                            if (v >= 0 && v !== t.lookback_days) void patchStreaming(t, { lookback_days: v });
-                          }}
+                          onChange={(e) => setDraft(t.source_view, { lookback_days: Number(e.target.value) })}
                         />
                       </TD>
                       <TD className="font-mono text-xs text-neutral-500">
@@ -357,17 +402,29 @@ export default function SettingsPage() {
                         {t.last_status ? <Badge tone={t.last_status === "ok" ? "success" : "danger"}>{t.last_status}</Badge> : null}
                       </TD>
                       <TD>
-                        <Button
-                          variant="secondary"
-                          size="sm"
-                          disabled={streamBusy === t.source_view}
-                          onClick={() => void runOnce(t)}
-                        >
-                          Run once
-                        </Button>
+                        <div className="flex items-center gap-1.5">
+                          <Button
+                            size="sm"
+                            disabled={streamBusy === t.source_view || !dirty}
+                            onClick={() => void applyStreaming(t)}
+                            title="Save this table's streaming config"
+                          >
+                            {streamBusy === t.source_view ? "Applying…" : "Apply"}
+                          </Button>
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            disabled={streamBusy === t.source_view}
+                            onClick={() => void runOnce(t)}
+                            title="Run one streaming cycle now"
+                          >
+                            Run once
+                          </Button>
+                        </div>
                       </TD>
                     </TR>
-                  ))}
+                    );
+                  })}
                 </TBody>
               </Table>
             </>
