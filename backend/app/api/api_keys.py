@@ -11,7 +11,7 @@ from app.models.user import User
 from app.schemas.api_key import ApiKeyCreate, ApiKeyCreateResponse, ApiKeyRead, ApiKeyUpdate
 from app.services.api_key_service import (
     create_api_key,
-    deactivate_api_key,
+    delete_api_key,
     get_api_key,
     list_api_keys,
     update_api_key,
@@ -72,14 +72,16 @@ def update_api_key_endpoint(
 
 @router.delete(
     "/{api_key_id}",
-    response_model=ApiKeyRead,
+    status_code=status.HTTP_204_NO_CONTENT,
     dependencies=[Depends(require_permission("api_key.delete"))],
 )
-def deactivate_api_key_endpoint(
+def delete_api_key_endpoint(
     api_key_id: uuid.UUID,
     db: Annotated[Session, Depends(get_db)],
-) -> ApiKey:
+) -> None:
+    """Hard-delete the key (de-references its transactions to keep the audit log). 204 on success."""
     api_key = get_api_key(db, api_key_id)
     if api_key is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="API key not found")
-    return deactivate_api_key(db, api_key)
+    delete_api_key(db, api_key)
+    return None

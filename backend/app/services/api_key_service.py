@@ -4,11 +4,12 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.models.api_key import ApiKey
+from app.models.transaction import Transaction
 from app.schemas.api_key import ApiKeyCreate, ApiKeyUpdate
 
 
@@ -90,12 +91,19 @@ def update_api_key(db: Session, api_key: ApiKey, api_key_in: ApiKeyUpdate) -> Ap
     return api_key
 
 
-def deactivate_api_key(db: Session, api_key: ApiKey) -> ApiKey:
-    api_key.is_active = False
-    db.add(api_key)
+def delete_api_key(db: Session, api_key: ApiKey) -> None:
+    """Hard-delete an API key so it disappears from the list and can never authenticate again.
+
+    Child ``transactions`` rows are DE-REFERENCED (``api_key_id`` → NULL) first so the FK
+    (``fk_transactions_api_key_id``, no ON DELETE → RESTRICT) doesn't block the delete and the audit
+    log is PRESERVED — deleting a key removes the credential but never erases its history. (To merely
+    pause a key without removing it, use the ``is_active`` toggle / the "Disable" action instead.)
+    """
+    db.execute(
+        update(Transaction).where(Transaction.api_key_id == api_key.id).values(api_key_id=None)
+    )
+    db.delete(api_key)
     db.commit()
-    db.refresh(api_key)
-    return api_key
 
 
 def authenticate_api_key(db: Session, plain_key: str) -> AuthContext:

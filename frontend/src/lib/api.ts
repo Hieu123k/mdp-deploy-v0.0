@@ -446,9 +446,9 @@ export const updateApiKey = (
   id: string,
   body: { is_active?: boolean; name?: string; allowed_directions?: string[]; allowed_models?: string[] | null },
 ) => req<ApiKey>(`/api-keys/${id}`, { method: "PUT", body: JSON.stringify(body) });
-/** Soft-deactivate. */
+/** Hard-delete the key (backend de-references its transactions to keep the audit log). 204. */
 export const deleteApiKey = (id: string) =>
-  req<ApiKey>(`/api-keys/${id}`, { method: "DELETE" });
+  req<void>(`/api-keys/${id}`, { method: "DELETE" });
 
 // Connections
 export const CONNECTION_TYPES = ["postgresql", "oracle", "sqlserver", "rest_api", "mqtt"] as const;

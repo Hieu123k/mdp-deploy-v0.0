@@ -156,6 +156,37 @@ def test_inactive_api_key_fails(
     assert response.status_code == 401
 
 
+def test_delete_api_key_removes_it_and_keeps_transaction_log(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    db_session: Session,
+) -> None:
+    # Prompt 37 fix: DELETE is a real (hard) delete — the key disappears from the list — and it
+    # de-references any child transactions instead of hitting the FK RESTRICT, so the audit log stays.
+    import uuid as _uuid
+
+    from app.models.transaction import Transaction
+
+    created = create_external_api_key(client, auth_headers)
+    txn = Transaction(
+        direction="outbound", protocol="rest", status="success",
+        auth_type="api_key", api_key_id=_uuid.UUID(created["id"]),
+    )
+    db_session.add(txn)
+    db_session.commit()
+    txn_id = txn.id
+
+    resp = client.delete(f"/api-keys/{created['id']}", headers=auth_headers)
+    assert resp.status_code == 204
+
+    listed = client.get("/api-keys", headers=auth_headers).json()
+    assert all(k["id"] != created["id"] for k in listed)  # truly gone, not just disabled
+
+    db_session.expire_all()
+    kept = db_session.get(Transaction, txn_id)
+    assert kept is not None and kept.api_key_id is None  # log preserved, de-referenced
+
+
 def test_expired_api_key_fails(
     client: TestClient,
     auth_headers: dict[str, str],
