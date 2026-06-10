@@ -8,8 +8,12 @@ import { Card, CardBody, CardHeader } from "@/components/ui/Card";
 import { Input } from "@/components/ui/Input";
 import { Select } from "@/components/ui/Select";
 import { Table, THead, TBody, TR, TH, TD } from "@/components/ui/Table";
+import { useAuth } from "@/components/auth/AuthProvider";
 import {
   ApiError,
+  ora2pgClearPrimaryKey,
+  ora2pgDiscoverKeysTable,
+  ora2pgSetPrimaryKey,
   streamingProbe,
   streamingRunOnce,
   streamingStatus,
@@ -57,6 +61,14 @@ export function StreamingEditor() {
   const [drafts, setDrafts] = useState<Record<string, StreamDraft>>({});
   const [cols, setCols] = useState<Record<string, string[] | "loading">>({});
 
+  // PK config moved here from Migration Jobs (prompt 36): PK is the streaming upsert key, so it is
+  // configured next to the marker. Reuses the auth-gated ora2pg PK endpoints (require pk.edit).
+  const { user } = useAuth();
+  const isAdmin = user?.role === "admin";
+  const [pkEdit, setPkEdit] = useState<string | null>(null);
+  const [pkDraft, setPkDraft] = useState<string>("");
+  const [pkBusy, setPkBusy] = useState<string | null>(null);
+
   const load = useCallback(async () => {
     try {
       const s = await streamingStatus();
@@ -71,6 +83,74 @@ export function StreamingEditor() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  const savePk = useCallback(
+    async (view: string) => {
+      const cols2 = pkDraft.split(",").map((c) => c.trim()).filter(Boolean);
+      if (cols2.length === 0) {
+        setMsg("Enter at least one PK column (comma-separated)");
+        return;
+      }
+      setPkBusy(view);
+      setMsg(null);
+      try {
+        const r = await ora2pgSetPrimaryKey(view, cols2);
+        setMsg(`${view}: ${r.message}${r.index_error ? ` — index: ${r.index_error}` : ""}`);
+        setPkEdit(null);
+        await load();
+      } catch (e) {
+        setMsg(e instanceof ApiError ? e.message : "Save PK failed");
+      } finally {
+        setPkBusy(null);
+      }
+    },
+    [pkDraft, load],
+  );
+
+  const clearPk = useCallback(
+    async (view: string) => {
+      if (
+        !window.confirm(
+          `Clear the primary key for ${view}?\n\nDROPS the unique index only — ALL ROWS ARE KEPT. ` +
+            `With no PK, an incremental sync needs a sequence marker as its key; otherwise the table full-reloads.`,
+        )
+      )
+        return;
+      setPkBusy(view);
+      setMsg(null);
+      try {
+        const r = await ora2pgClearPrimaryKey(view);
+        setMsg(`${view}: ${r.message}`);
+        await load();
+      } catch (e) {
+        setMsg(e instanceof ApiError ? e.message : "Clear PK failed");
+      } finally {
+        setPkBusy(null);
+      }
+    },
+    [load],
+  );
+
+  const scanPk = useCallback(
+    async (view: string) => {
+      setPkBusy(view);
+      setMsg(null);
+      try {
+        const r = await ora2pgDiscoverKeysTable(view);
+        setMsg(
+          r.available
+            ? `${view}: PK ${r.persisted ? "updated from Oracle" : "not found"}.`
+            : `${view}: ${r.message ?? "Oracle unreachable"}`,
+        );
+        await load();
+      } catch (e) {
+        setMsg(e instanceof ApiError ? e.message : "Scan PK failed");
+      } finally {
+        setPkBusy(null);
+      }
+    },
+    [load],
+  );
 
   const probeCols = useCallback(async (view: string) => {
     setCols((c) => (c[view] ? c : { ...c, [view]: "loading" }));
@@ -93,7 +173,10 @@ export function StreamingEditor() {
 
   const apply = async (t: StreamingTable) => {
     const d = draftOf(t);
-    const full = !d.ts_col;
+    // Effective mode (prompt 36): full unless there's a marker AND a usable key (PK, or a sequence
+    // marker that is its own key). Mirrors the backend clamp so the floor isn't a surprise on reload.
+    const hasPk = (t.primary_key_columns?.length ?? 0) > 0;
+    const full = !d.ts_col || (!hasPk && d.ts_kind !== "sequence");
     setBusy(t.source_view);
     setMsg(null);
     try {
@@ -139,7 +222,7 @@ export function StreamingEditor() {
             <Radio size={16} /> Streaming (2-case: incremental / full-reload)
           </span>
         }
-        subtitle="Pick a watermark column for incremental sync, or '(none)' for full-reload (atomic swap, min 12h). Sequence = monotonic id (e.g. ILUKID); date = Julian UPMJ."
+        subtitle="Configure the marker (watermark) and the upsert key (PK) per table. Incremental needs a key: a PK, or a sequence marker (unique id, e.g. ILUKID) that doubles as its own key. A date marker with no PK can't dedup → full-reload (atomic swap, min 12h)."
         action={
           <Button variant="secondary" size="sm" onClick={() => void load()}>
             Refresh
@@ -158,6 +241,7 @@ export function StreamingEditor() {
                   <TH>Enabled</TH>
                   <TH>Table</TH>
                   <TH>Watermark / mode</TH>
+                  <TH>Primary key / upsert key</TH>
                   <TH>Run every (s)</TH>
                   <TH>Lookback (d)</TH>
                   <TH>Cursor / status</TH>
@@ -169,7 +253,17 @@ export function StreamingEditor() {
                 {(streaming ?? []).map((t) => {
                   const d = draftOf(t);
                   const dirty = isDirty(t);
-                  const full = !d.ts_col;
+                  const pkCols = t.primary_key_columns ?? [];
+                  const hasPk = pkCols.length > 0;
+                  const seq = d.ts_kind === "sequence";
+                  // Effective upsert key under the live draft (prompt 36): PK wins; else a sequence
+                  // marker is its own key; a date marker with no PK has no key → full-reload.
+                  const keyKind: "primary_key" | "marker" | null = hasPk
+                    ? "primary_key"
+                    : d.ts_col && seq
+                      ? "marker"
+                      : null;
+                  const full = !d.ts_col || !keyKind;
                   const opts = cols[t.source_view];
                   const colList = Array.isArray(opts) ? opts : [];
                   // keep the currently-selected col visible even before a probe loads
@@ -193,7 +287,11 @@ export function StreamingEditor() {
                       <TD className="min-w-[15rem]">
                         <div className="flex flex-wrap items-center gap-1.5">
                           <Badge tone={full ? "warning" : "success"}>
-                            {full ? "full reload (≥12h)" : `incremental (ts:${d.ts_col})`}
+                            {full
+                              ? "full reload (≥12h)"
+                              : keyKind === "marker"
+                                ? `incremental (ts:${d.ts_col}, key=marker)`
+                                : `incremental (ts:${d.ts_col}, key=PK)`}
                           </Badge>
                           <Select
                             aria-label={`Watermark column for ${t.source_view}`}
@@ -211,7 +309,7 @@ export function StreamingEditor() {
                               </option>
                             ))}
                           </Select>
-                          {!full && (
+                          {d.ts_col && (
                             <Select
                               aria-label={`Watermark kind for ${t.source_view}`}
                               value={d.ts_kind}
@@ -223,7 +321,78 @@ export function StreamingEditor() {
                               <option value="sequence">sequence (id)</option>
                             </Select>
                           )}
+                          {d.ts_col && !seq && !hasPk && (
+                            <span className="text-[10px] text-warning" title="A date marker can't dedup without a PK — set a PK or use a sequence marker for incremental.">
+                              date + no PK → full
+                            </span>
+                          )}
                         </div>
+                      </TD>
+                      <TD className="min-w-[13rem]">
+                        {pkEdit === t.source_view ? (
+                          <div className="flex items-center gap-1">
+                            <Input
+                              value={pkDraft}
+                              onChange={(e) => setPkDraft(e.target.value)}
+                              className="max-w-[10rem]"
+                              placeholder="gldoc, glkco"
+                            />
+                            <Button size="sm" disabled={pkBusy === t.source_view} onClick={() => void savePk(t.source_view)}>
+                              {pkBusy === t.source_view ? "…" : "Save"}
+                            </Button>
+                            <Button size="sm" variant="ghost" onClick={() => setPkEdit(null)} title="Cancel">
+                              ✕
+                            </Button>
+                          </div>
+                        ) : (
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            {hasPk ? (
+                              <span className="font-mono text-xs text-neutral-700 dark:text-neutral-300">{pkCols.join(", ")}</span>
+                            ) : keyKind === "marker" ? (
+                              <span className="font-mono text-xs text-neutral-500" title="No PK — the sequence marker is the upsert key">
+                                marker:{d.ts_col}
+                              </span>
+                            ) : (
+                              <span className="text-neutral-400" title="No upsert key — table full-reloads">—</span>
+                            )}
+                            {isAdmin && (
+                              <>
+                                <Button
+                                  size="sm"
+                                  variant="ghost"
+                                  disabled={pkBusy === t.source_view}
+                                  onClick={() => {
+                                    setPkEdit(t.source_view);
+                                    setPkDraft(pkCols.join(", "));
+                                  }}
+                                  title="Edit PK (admin)"
+                                >
+                                  Edit
+                                </Button>
+                                <Button
+                                  size="sm"
+                                  variant="ghost"
+                                  disabled={pkBusy === t.source_view}
+                                  onClick={() => void scanPk(t.source_view)}
+                                  title="Scan PK from Oracle (discover-keys)"
+                                >
+                                  {pkBusy === t.source_view ? "…" : "Scan"}
+                                </Button>
+                                {hasPk && (
+                                  <Button
+                                    size="sm"
+                                    variant="destructive"
+                                    disabled={pkBusy === t.source_view}
+                                    onClick={() => void clearPk(t.source_view)}
+                                    title="Clear PK — drops the unique index (keeps data)"
+                                  >
+                                    Clear
+                                  </Button>
+                                )}
+                              </>
+                            )}
+                          </div>
+                        )}
                       </TD>
                       <TD>
                         <Input

@@ -989,6 +989,9 @@ export type StreamingTable = {
   granularity: string;
   poll_interval_sec: number;
   lookback_days: number;
+  primary_key_columns: string[] | null;
+  effective_upsert_key: string[] | null; // PK, or the sequence marker itself, or null (full-reload)
+  upsert_key_kind?: string | null; // primary_key | marker | null
   mode?: string; // incremental | full
   min_interval_sec?: number;
   last_watermark: string | null;

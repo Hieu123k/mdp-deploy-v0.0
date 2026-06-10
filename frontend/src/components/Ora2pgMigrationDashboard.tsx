@@ -8,18 +8,14 @@ import { Card, CardBody, CardHeader } from "@/components/ui/Card";
 import { Input } from "@/components/ui/Input";
 import { Select } from "@/components/ui/Select";
 import { Table, TBody, TD, TH, THead, TR } from "@/components/ui/Table";
-import { useAuth } from "@/components/auth/AuthProvider";
 import {
   ApiError,
   ora2pgConfigPreview,
-  ora2pgDiscoverKeysTable,
   ora2pgDownloadReconciliation,
   ora2pgGetRun,
   ora2pgInfo,
   ora2pgListTables,
   ora2pgRepair,
-  ora2pgSetPrimaryKey,
-  ora2pgClearPrimaryKey,
   ora2pgStart,
   ora2pgStreamRun,
   ora2pgVerify,
@@ -124,14 +120,6 @@ export function Ora2pgMigrationDashboard() {
   const [batchRunning, setBatchRunning] = useState(false);
   const batchPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // Primary-Key editor (admin) + Scan (discover-keys).
-  const { user } = useAuth();
-  const isAdmin = user?.role === "admin";
-  const [pkBusy, setPkBusy] = useState<string | null>(null);
-  const [pkEdit, setPkEdit] = useState<string | null>(null);
-  const [pkDraft, setPkDraft] = useState<string>("");
-  const [pkMsg, setPkMsg] = useState<string | null>(null);
-
   const loadTables = useCallback(async () => {
     try {
       const r = await ora2pgListTables();
@@ -142,72 +130,9 @@ export function Ora2pgMigrationDashboard() {
     }
   }, []);
 
-  // "Scan all PK" toolbar button removed (prompt 33) — PK comes from the reference library by
-  // default; per-row Scan (onScanTablePk) remains. The bulk discover-keys API is left intact.
-
-  const onScanTablePk = useCallback(
-    async (table: string) => {
-      setPkBusy(table);
-      setPkMsg(null);
-      try {
-        const r = await ora2pgDiscoverKeysTable(table);
-        setPkMsg(r.available ? `${table}: PK ${r.persisted ? "updated" : "not found"}.` : `${table}: ${r.message ?? "Oracle unreachable"}`);
-        await loadTables();
-      } catch (e) {
-        setPkMsg(e instanceof ApiError ? e.message : "Scan failed");
-      } finally {
-        setPkBusy(null);
-      }
-    },
-    [loadTables],
-  );
-
-  const onSavePk = useCallback(
-    async (table: string) => {
-      const cols = pkDraft.split(",").map((c) => c.trim()).filter(Boolean);
-      if (cols.length === 0) {
-        setPkMsg("Enter at least one column (comma-separated)");
-        return;
-      }
-      setPkBusy(table);
-      setPkMsg(null);
-      try {
-        const r = await ora2pgSetPrimaryKey(table, cols);
-        setPkMsg(`${table}: ${r.message}`);
-        setPkEdit(null);
-        await loadTables();
-      } catch (e) {
-        setPkMsg(e instanceof ApiError ? e.message : "Save PK failed");
-      } finally {
-        setPkBusy(null);
-      }
-    },
-    [pkDraft, loadTables],
-  );
-
-  const onClearPk = useCallback(
-    async (table: string) => {
-      if (
-        !window.confirm(
-          `Clear the primary key for ${table}?\n\nThis DROPS the unique index only — ALL ROWS ARE KEPT. ` +
-            `With no PK the table can't upsert, so streaming for it falls back to full-reload.`,
-        )
-      )
-        return;
-      setPkBusy(table);
-      setPkMsg(null);
-      try {
-        const r = await ora2pgClearPrimaryKey(table);
-        setPkMsg(`${table}: ${r.message}`);
-        await loadTables();
-      } catch (e) {
-        setPkMsg(e instanceof ApiError ? e.message : "Clear PK failed");
-      } finally {
-        setPkBusy(null);
-      }
-    },
-    [loadTables],
-  );
+  // Primary Key here is READ-ONLY (prompt 36): the column shows the PK + its source badge so an
+  // operator can see the upsert key at a glance, but ALL editing (set / scan / clear) lives in the
+  // Streaming tab — PK is the streaming upsert key, so it is configured where streaming is.
 
   const onVerify = useCallback(
     async (table: string) => {
@@ -586,8 +511,6 @@ export function Ora2pgMigrationDashboard() {
                 <ListChecks size={14} />{" "}
                 {batchRunning ? "Verifying…" : `Verify selected${verifySel.size ? ` (${verifySel.size})` : ""}`}
               </Button>
-              {/* "Scan all PK" removed (prompt 33): PK now comes from the reference library by default;
-                  per-row Scan remains for the optional case. onScanAllPk endpoint kept (no API change). */}
               <Button variant="ghost" size="sm" onClick={() => onDownloadLog("csv")}>
                 <Download size={14} /> Log .csv
               </Button>
@@ -596,7 +519,6 @@ export function Ora2pgMigrationDashboard() {
               </Button>
             </div>
           </div>
-          {pkMsg && <p className="mb-2 text-xs text-neutral-600 dark:text-neutral-300">{pkMsg}</p>}
           <Table>
             <THead>
               <TR>
@@ -639,75 +561,26 @@ export function Ora2pgMigrationDashboard() {
                   <TD className="text-neutral-500">{t.module}</TD>
                   <TD className="font-medium text-neutral-800">{t.table}</TD>
                   <TD>
-                    {pkEdit === t.table ? (
-                      <div className="flex items-center gap-1">
-                        <Input
-                          value={pkDraft}
-                          onChange={(e) => setPkDraft(e.target.value)}
-                          className="max-w-[11rem]"
-                          placeholder="gldoc, gldct"
-                        />
-                        <Button size="sm" disabled={pkBusy === t.table} onClick={() => onSavePk(t.table)}>
-                          {pkBusy === t.table ? "…" : "Save"}
-                        </Button>
-                        <Button size="sm" variant="ghost" onClick={() => setPkEdit(null)} title="Cancel">
-                          ✕
-                        </Button>
-                      </div>
-                    ) : (
-                      <div className="flex items-center gap-1.5">
-                        {t.pk_columns && t.pk_columns.length > 0 ? (
-                          <span className="font-mono text-xs text-neutral-700 dark:text-neutral-300">
-                            {t.pk_columns.join(", ")}
-                          </span>
-                        ) : (
-                          <span className="text-neutral-400">—</span>
-                        )}
-                        {t.pk_source && (
-                          <Badge tone={t.pk_source === "manual" ? "info" : t.pk_source === "scanned" ? "success" : "neutral"}>
-                            {t.pk_source}
-                          </Badge>
-                        )}
-                        {t.pk_warning && (
-                          <span className="cursor-help text-warning" title={t.pk_warning}>
-                            ⚠ verify
-                          </span>
-                        )}
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          disabled={pkBusy === t.table}
-                          onClick={() => onScanTablePk(t.table)}
-                          title="Scan PK (discover-keys)"
-                        >
-                          {pkBusy === t.table ? "…" : "Scan"}
-                        </Button>
-                        {isAdmin && (
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            onClick={() => {
-                              setPkEdit(t.table);
-                              setPkDraft((t.pk_columns ?? []).join(", "));
-                            }}
-                            title="Edit PK (admin)"
-                          >
-                            Edit
-                          </Button>
-                        )}
-                        {isAdmin && t.pk_columns && t.pk_columns.length > 0 && (
-                          <Button
-                            size="sm"
-                            variant="destructive"
-                            disabled={pkBusy === t.table}
-                            onClick={() => void onClearPk(t.table)}
-                            title="Clear PK — drops the unique index (keeps data); streaming → full-reload"
-                          >
-                            Clear PK
-                          </Button>
-                        )}
-                      </div>
-                    )}
+                    {/* READ-ONLY (prompt 36): view the PK + source here; edit it in the Streaming tab. */}
+                    <div className="flex items-center gap-1.5">
+                      {t.pk_columns && t.pk_columns.length > 0 ? (
+                        <span className="font-mono text-xs text-neutral-700 dark:text-neutral-300">
+                          {t.pk_columns.join(", ")}
+                        </span>
+                      ) : (
+                        <span className="text-neutral-400" title="No PK — set it in the Streaming tab">—</span>
+                      )}
+                      {t.pk_source && (
+                        <Badge tone={t.pk_source === "manual" ? "info" : t.pk_source === "scanned" ? "success" : "neutral"}>
+                          {t.pk_source}
+                        </Badge>
+                      )}
+                      {t.pk_warning && (
+                        <span className="cursor-help text-warning" title={t.pk_warning}>
+                          ⚠ verify
+                        </span>
+                      )}
+                    </div>
                   </TD>
                   <TD className="text-neutral-500">
                     {t.target_schema}.{t.target_table}
