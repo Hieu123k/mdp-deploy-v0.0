@@ -712,6 +712,7 @@ export type Ora2pgTable = {
   target_table: string;
   target_schema: string;
   current_rows: number | null;
+  current_rows_estimated?: boolean | null;
   cursor: string | null;
   last_run_id: string | null;
   last_run_status: string | null;

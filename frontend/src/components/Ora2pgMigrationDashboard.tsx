@@ -1,7 +1,7 @@
 "use client";
 
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { CheckCircle2, Database, Download, KeyRound, ListChecks, Play, RefreshCw, Terminal } from "lucide-react";
+import { CheckCircle2, Database, Download, ListChecks, Play, RefreshCw, Terminal } from "lucide-react";
 import { Badge, type BadgeTone } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card, CardBody, CardHeader } from "@/components/ui/Card";
@@ -12,7 +12,6 @@ import { useAuth } from "@/components/auth/AuthProvider";
 import {
   ApiError,
   ora2pgConfigPreview,
-  ora2pgDiscoverKeys,
   ora2pgDiscoverKeysTable,
   ora2pgDownloadReconciliation,
   ora2pgGetRun,
@@ -142,24 +141,8 @@ export function Ora2pgMigrationDashboard() {
     }
   }, []);
 
-  const pkCoverage = useMemo(
-    () => tables.filter((t) => t.pk_columns && t.pk_columns.length > 0).length,
-    [tables],
-  );
-
-  const onScanAllPk = useCallback(async () => {
-    setPkBusy("__all__");
-    setPkMsg(null);
-    try {
-      const r = await ora2pgDiscoverKeys();
-      setPkMsg(r.available ? `Scan PK: ${r.persisted} table(s) updated.` : `Scan PK: ${r.message ?? "Oracle unreachable"}`);
-      await loadTables();
-    } catch (e) {
-      setPkMsg(e instanceof ApiError ? e.message : "Scan PK failed");
-    } finally {
-      setPkBusy(null);
-    }
-  }, [loadTables]);
+  // "Scan all PK" toolbar button removed (prompt 33) — PK comes from the reference library by
+  // default; per-row Scan (onScanTablePk) remains. The bulk discover-keys API is left intact.
 
   const onScanTablePk = useCallback(
     async (table: string) => {
@@ -324,16 +307,21 @@ export function Ora2pgMigrationDashboard() {
         /* stream ended; poll fallback below confirms terminal state */
       },
     );
-    // Poll fallback (covers SSE drops / proxy buffering)
+    // Poll fallback (~2s) — covers SSE drops / proxy buffering. When both the live SSE value and the
+    // poll are "running", keep whichever shows MORE rows_done (the freshest), so a stalled SSE never
+    // freezes the bar — the poll keeps it moving.
     pollRef.current = setInterval(async () => {
       try {
         const p = await ora2pgGetRun(runId);
-        setProgress((cur) => (cur && cur.status === "running" && p.status === "running" ? cur : p));
+        setProgress((cur) => {
+          if (!cur || p.status !== "running") return p;
+          return (p.rows_done ?? 0) >= (cur.rows_done ?? 0) ? p : cur;
+        });
         if (p.status === "success" || p.status === "failed") finishRun();
       } catch {
         /* ignore */
       }
-    }, 2500);
+    }, 2000);
   };
 
   const onStart = async () => {
@@ -573,15 +561,8 @@ export function Ora2pgMigrationDashboard() {
                 <ListChecks size={14} />{" "}
                 {batchRunning ? "Verifying…" : `Verify selected${verifySel.size ? ` (${verifySel.size})` : ""}`}
               </Button>
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={onScanAllPk}
-                disabled={pkBusy !== null}
-                title="Discover primary keys (Oracle unique index) for all tables"
-              >
-                <KeyRound size={14} /> {pkBusy === "__all__" ? "Scanning…" : `Scan all PK (${pkCoverage}/${tables.length})`}
-              </Button>
+              {/* "Scan all PK" removed (prompt 33): PK now comes from the reference library by default;
+                  per-row Scan remains for the optional case. onScanAllPk endpoint kept (no API change). */}
               <Button variant="ghost" size="sm" onClick={() => onDownloadLog("csv")}>
                 <Download size={14} /> Log .csv
               </Button>
@@ -695,7 +676,18 @@ export function Ora2pgMigrationDashboard() {
                   <TD className="text-neutral-500">
                     {t.target_schema}.{t.target_table}
                   </TD>
-                  <TD>{fmtInt(t.current_rows)}</TD>
+                  <TD className="whitespace-nowrap">
+                    {t.current_rows == null ? (
+                      <span className="text-neutral-400" title="not analyzed yet — run Verify for an exact count">?</span>
+                    ) : (
+                      <>
+                        {fmtInt(t.current_rows)}
+                        {t.current_rows_estimated && (
+                          <span className="ml-1 text-xs text-warning" title="planner estimate (reltuples) — Verify for exact">≈</span>
+                        )}
+                      </>
+                    )}
+                  </TD>
                   {/* Source = cached Oracle count (estimate refreshed in background, or exact via Verify) */}
                   <TD
                     title={

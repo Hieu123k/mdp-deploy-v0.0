@@ -32,10 +32,15 @@ from app.models.migration import MigrationRun
 _PROGRESS: dict[str, dict[str, Any]] = {}
 _LOCK = threading.Lock()
 
-# ora2pg COPY progress line, e.g.
+# ora2pg COPY progress lines come in TWO shapes (both on STDERR), e.g.
 #   [=====>     ] 8500000/30475000 rows (27.9%) on total estimated data (82 sec, avg: 103000 recs/sec)
+#   [=====>     ] 250000/0 total rows (100.0%) - (3 sec., avg: 83333 recs/sec), V2_PRO_F0911 in progress.
+# The 2nd shape is what we actually get when exporting a VIEW (ora2pg can't pre-count it, so the
+# denominator is 0, the literal word "total" sits before "rows", and the % is a useless 100.0).
+# The regex MUST tolerate the optional "total " and "tuples/sec" or live progress is dropped (the
+# real cause of the "frozen until the end" bug — NOT stdout buffering; the lines arrive every ~3s).
 _PROGRESS_RE = re.compile(
-    r"(\d+)\s*/\s*(\d+)\s+rows\s+\(([\d.]+)%\)(?:.*?avg:\s*(\d+)\s*recs/sec)?",
+    r"(\d+)\s*/\s*(\d+)\s+(?:total\s+)?rows\s+\(([\d.]+)%\)(?:.*?avg:\s*(\d+)\s*(?:recs|tuples)/sec)?",
     re.IGNORECASE,
 )
 
@@ -155,6 +160,22 @@ def _count_target(target_table: str) -> int | None:
         return None
 
 
+def _source_estimate(source_view: str) -> int | None:
+    """Cached source row-count estimate (Ora2pgSourceCount) used to seed the live-progress
+    denominator when ora2pg can't pre-count the view. Best-effort; None when not cached."""
+    try:
+        from app.models.source_count import Ora2pgSourceCount  # lazy: avoid import cycle
+        from sqlalchemy import select
+
+        with SessionLocal() as db:
+            row = db.scalar(
+                select(Ora2pgSourceCount).where(Ora2pgSourceCount.source_view == source_view.upper())
+            )
+            return int(row.source_row_count) if row and row.source_row_count else None
+    except Exception:
+        return None
+
+
 def _ensure_audit_cols(schema: str, target: str, run_id: str) -> None:
     """Add per-row audit columns to the target staging table (idempotent), then point
     `_migrate_run_id`'s DEFAULT at this run. Must run AFTER `_apply_ddl` (which DROP/CREATEs
@@ -233,14 +254,21 @@ def _ensure_unique_index(schema: str, target: str, pk_columns: list[str]) -> Non
 
 
 def _copy_stream(
-    api: Any, container_id: str, run_id: str, started: float, log_tail: list[str], *, action: str = "COPY"
+    api: Any, container_id: str, run_id: str, started: float, log_tail: list[str], *,
+    action: str = "COPY", total_hint: int | None = None,
 ) -> tuple[int | None, str | None]:
     """Run `ora2pg -t <action>` (COPY or INSERT), stream stdout/stderr and parse progress into
-    the live snapshot. Returns (exit_code, error). `error` is set only when the stream raised."""
+    the live snapshot. Returns (exit_code, error). `error` is set only when the stream raised.
+
+    ``total_hint`` is an estimated source row-count (from the source-count cache) used as the
+    denominator when ora2pg reports ``N/0 total rows`` (i.e. couldn't pre-count the view) so the
+    UI still gets a real percentage + ETA. ``stdbuf -oL -eL`` is belt-and-suspenders line-buffering
+    (the diagnosed freeze was a progress-regex mismatch, not buffering — but this guards larger
+    exports and costs nothing when ora2pg already flushes)."""
     try:
         exec_id = api.exec_create(
             container_id,
-            cmd=["ora2pg", "-c", "/config/ora2pg.conf", "-t", action],
+            cmd=["stdbuf", "-oL", "-eL", "ora2pg", "-c", "/config/ora2pg.conf", "-t", action],
             stdout=True, stderr=True,
         )["Id"]
         stream = api.exec_start(exec_id, stream=True)
@@ -260,16 +288,19 @@ def _copy_stream(
                 m = _PROGRESS_RE.search(line)
                 if m:
                     done = int(m.group(1))
-                    total = int(m.group(2))
-                    pct = float(m.group(3))
+                    # ora2pg prints 0 as the denominator when it couldn't pre-count the view → fall
+                    # back to the seeded source estimate so % and ETA are real, not a stuck 100%.
+                    total = int(m.group(2)) or (total_hint or 0)
                     rps = float(m.group(4)) if m.group(4) else 0.0
                     elapsed = time.monotonic() - started
                     if not rps and elapsed > 0:
                         rps = done / elapsed
-                    eta = (total - done) / rps if rps > 0 and total else None
+                    # Recompute % from the real total (ignore ora2pg's group-3 100% when total==0).
+                    pct = round(min(100.0, 100.0 * done / total), 1) if total else 0.0
+                    eta = (total - done) / rps if (rps > 0 and total and total > done) else None
                     _set(
                         run_id, status="running", phase="copy",
-                        rows_done=done, rows_total=total, pct=pct,
+                        rows_done=done, rows_total=(total or None), pct=pct,
                         rows_per_sec=round(rps, 1), elapsed_sec=round(elapsed, 1),
                         eta_sec=(round(eta, 1) if eta is not None else None),
                         message=line[-300:],
@@ -286,6 +317,9 @@ def _copy_stream(
 def _worker(run_id: str, table: Ora2pgTable, test_rows: int, pk_columns: list[str] | None = None) -> None:
     started = time.monotonic()
     started_at = datetime.now(timezone.utc)
+    # Seed the live-progress denominator from the cached source estimate (so % + ETA work even
+    # though ora2pg reports N/0 for a view). test_rows caps the run, so it wins as the total.
+    total_hint = test_rows if test_rows and test_rows > 0 else _source_estimate(table.table)
     _set(
         run_id,
         run_id=run_id,
@@ -294,7 +328,7 @@ def _worker(run_id: str, table: Ora2pgTable, test_rows: int, pk_columns: list[st
         status="running",
         phase="starting",
         rows_done=0,
-        rows_total=None,
+        rows_total=total_hint,
         pct=0.0,
         rows_per_sec=0.0,
         elapsed_sec=0.0,
@@ -378,7 +412,7 @@ def _worker(run_id: str, table: Ora2pgTable, test_rows: int, pk_columns: list[st
 
     # 3) COPY pass — stream rows and parse progress
     _set(run_id, phase="copy", message="Copying data (ora2pg -t COPY)…")
-    exit_code, err = _copy_stream(api, container.id, run_id, started, log_tail)
+    exit_code, err = _copy_stream(api, container.id, run_id, started, log_tail, total_hint=total_hint)
     if err:
         fail(err)
         return

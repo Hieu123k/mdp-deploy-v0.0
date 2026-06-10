@@ -87,6 +87,7 @@ def _get_or_create_job(db: Session, table) -> MigrationJob:
 def _count_table(db: Session, target_table: str) -> int | None:
     # SAVEPOINT so a "relation does not exist" error rolls back only this probe and
     # does not abort the request transaction (postgres behaviour).
+    # EXACT count — kept for Verify / validation, NOT for the tab-load path (see _estimate_table).
     try:
         with db.begin_nested():
             return int(
@@ -96,6 +97,26 @@ def _count_table(db: Session, target_table: str) -> int | None:
                     )
                 ).scalar_one()
             )
+    except Exception:
+        return None
+
+
+def _estimate_table(db: Session, target_table: str) -> int | None:
+    """O(1) planner-stat estimate for the tab-load path (replaces a full count(*) per table).
+    reltuples is -1 before the table's first ANALYZE/autovacuum and NULL when the relation is
+    missing → both map to None ("?" / not-yet-known). Exact numbers come from Verify."""
+    try:
+        with db.begin_nested():
+            val = db.execute(
+                text(
+                    "SELECT reltuples::bigint FROM pg_class "
+                    "WHERE oid = to_regclass(:rel)"
+                ),
+                {"rel": f"{settings.ora2pg_target_schema}.{target_table}"},
+            ).scalar()
+        if val is None or val < 0:
+            return None
+        return int(val)
     except Exception:
         return None
 
@@ -176,7 +197,8 @@ def _run_snapshot(db: Session, run: MigrationRun) -> dict[str, Any]:
         "pct": 100.0 if run.status == "success" else 0.0,
         "rows_per_sec": 0.0,
         "elapsed_sec": elapsed or 0,
-        "eta_sec": 0 if run.status == "success" else None,
+        # Finished/idle runs have NO ETA — return None so the UI shows "—", not a misleading "0".
+        "eta_sec": None,
         "message": run.error_message or run.run_scope or run.status,
         "started_at": run.started_at.isoformat() if run.started_at else None,
         "updated_at": run.updated_at.isoformat() if run.updated_at else None,
@@ -237,7 +259,7 @@ def list_tables(db: Annotated[Session, Depends(get_db)]) -> dict[str, Any]:
     for t in MIGRATABLE_TABLES:
         job = db.scalar(select(MigrationJob).where(MigrationJob.name == _job_name(t.target_table)))
         last = _latest_run(db, job.id) if job else None
-        current_rows = _count_table(db, t.target_table)
+        current_rows = _estimate_table(db, t.target_table)  # O(1) planner estimate (exact → Verify)
         pk = job.primary_key_columns if job else None
         items.append({
             "table": t.table,
@@ -247,6 +269,7 @@ def list_tables(db: Annotated[Session, Depends(get_db)]) -> dict[str, Any]:
             "target_table": t.target_table,
             "target_schema": settings.ora2pg_target_schema,
             "current_rows": current_rows,
+            "current_rows_estimated": True,
             "cursor": _cursor_for(db, t.target_table),
             "last_run_id": str(last.id) if last else None,
             "last_run_status": last.status if last else None,

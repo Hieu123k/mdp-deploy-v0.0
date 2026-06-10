@@ -1111,18 +1111,11 @@ export default function MigrationJobsPage() {
 
   return (
     <>
+      {/* "Create from Template" + "New Migration Job" buttons removed (prompt 33): the dashboard
+          drives migrations from the reference catalog; the create/template modals + APIs are kept. */}
       <PageHeader
         title="Migration Jobs"
         subtitle={`Public API: ${apiPath("/migration-jobs")} - tracks external ora2pg/bulk loads and validates PostgreSQL staging targets.`}
-        action={
-          <div className="flex flex-wrap gap-2">
-            <Button variant="secondary" onClick={openTemplateCreate}>
-              <ClipboardList size={16} />
-              Create from Template
-            </Button>
-            <Button onClick={openCreateJob}>New Migration Job</Button>
-          </div>
-        }
       />
       <Ora2pgMigrationDashboard />
       <Card className="mb-4">
