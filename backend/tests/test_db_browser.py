@@ -122,13 +122,20 @@ def test_preview_limit_max_is_enforced(
 ) -> None:
     seed_staging(client, auth_headers)
 
+    # Cap raised 100 -> 10000 (prompt 34: 50/100/500/1000/All selector) — 500 is honoured now.
     response = client.get(
         "/db-browser/schemas/mdp_staging/tables/stg_jde_supplier/preview?limit=500",
         headers=auth_headers,
     )
-
     assert response.status_code == 200
-    assert response.json()["limit"] == 100
+    assert response.json()["limit"] == 500
+
+    # The hard ceiling (le=10000) rejects anything above it, so "All" can never SELECT a 58M table.
+    capped = client.get(
+        "/db-browser/schemas/mdp_staging/tables/stg_jde_supplier/preview?limit=99999",
+        headers=auth_headers,
+    )
+    assert capped.status_code == 422
 
 
 def test_preview_requires_authentication(client: TestClient) -> None:

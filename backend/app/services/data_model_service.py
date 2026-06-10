@@ -2,10 +2,11 @@ import uuid
 from typing import Any
 
 from pydantic import ValidationError
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.models.data_model import DataModel
+from app.models.transaction import Transaction
 from app.schemas.data_model import DataModelCreate, DataModelUpdate
 from app.services import table_generator
 from app.services.table_generator import TableGenerationError
@@ -113,10 +114,10 @@ def create_data_model(db: Session, data_model_in: DataModelCreate) -> DataModel:
     try:
         if data_model_in.type == "A":
             generated_table = table_generator.get_generated_table_name(data_model_in.name)
-            if table_generator.generated_table_exists(db, data_model_in.name):
-                raise TableGenerationError(
-                    f"Generated table already exists: {generated_table}"
-                )
+            # If the generated table already exists it is an ORPHAN from a previously hard-deleted
+            # model (data-safety keeps the table). REUSE it — CREATE TABLE IF NOT EXISTS makes the
+            # create a no-op and the existing data survives. Model names are unique, so this can only
+            # be an orphan, never a live-model collision.
             payload["generated_table"] = generated_table
         if data_model_in.type == "B":
             validate_type_b_mapping(db, data_model_in)
@@ -175,6 +176,14 @@ def delete_data_model_record(db: Session, data_model: DataModel) -> None:
     """Hard-delete ONLY the data-model metadata record (admin Delete action). DATA-SAFETY: this
     deliberately does NOT drop the generated ``mdp_data.dm_*`` table — the physical data survives
     and is reused if a model of the same name is re-created. Orphan-table cleanup is a later
-    milestone."""
+    milestone.
+
+    Transaction logs reference data_models.id (FK, RESTRICT). We KEEP those logs (audit/data-safety)
+    but NULL their ``data_model_id`` first so the delete isn't blocked by the FK (and never 500s)."""
+    db.execute(
+        update(Transaction)
+        .where(Transaction.data_model_id == data_model.id)
+        .values(data_model_id=None)
+    )
     db.delete(data_model)
     db.commit()

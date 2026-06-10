@@ -317,22 +317,22 @@ def test_unauthenticated_request_fails(client: TestClient) -> None:
     assert response.status_code == 401
 
 
-def test_duplicate_type_a_table_returns_clear_error(
+def test_duplicate_type_a_table_reuses_orphan(
     client: TestClient,
     auth_headers: dict[str, str],
     monkeypatch,
 ) -> None:
+    # data-safety (prompt 34): an existing generated table is an ORPHAN from a previously
+    # hard-deleted model — re-creating a same-name model now REUSES it (CREATE TABLE IF NOT EXISTS),
+    # never drops it, so the create succeeds instead of erroring.
     monkeypatch.setattr(
         "app.services.table_generator.generated_table_exists",
         lambda db, model_name: True,
     )
 
     response = client.post("/data-models", headers=auth_headers, json=type_a_payload())
-    list_response = client.get("/data-models", headers=auth_headers)
 
-    assert response.status_code == 409
-    assert "Generated table already exists" in response.json()["detail"]
-    assert list_response.json() == []
+    assert response.status_code == 201, response.text
 
 
 def test_failed_table_creation_rolls_back_metadata(
