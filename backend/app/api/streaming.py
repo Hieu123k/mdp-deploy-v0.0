@@ -50,7 +50,7 @@ def get_config(table_name: str, db: Annotated[Session, Depends(get_db)]) -> dict
     if table is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown table")
     cfg = streaming_service.get_config(db, table.table)
-    return streaming_service.config_view(cfg, table)
+    return streaming_service.config_view(cfg, table, pk=streaming_service.effective_pk(db, table, cfg))
 
 
 @router.put("/config/{table_name}", dependencies=[Depends(require_permission("streaming.configure"))])
@@ -87,10 +87,18 @@ def put_config(
                 detail=f"ts_col '{new_ts_col}' not found in view {table.table} (columns probed: {len(cols)})",
             )
 
-    # Case-B (full-reload) interval floor: a table with no watermark column copies the WHOLE view
-    # every cycle → clamp poll_interval_sec to the 12h hard floor whenever the EFFECTIVE mode is full,
-    # even if this request doesn't send poll_interval_sec (e.g. it only clears ts_col).
-    if not new_ts_col:
+    # Case-B (full-reload) interval floor: a full-reload table copies the WHOLE view every cycle →
+    # clamp poll_interval_sec to the 12h hard floor whenever the EFFECTIVE mode is full, even if this
+    # request doesn't send poll_interval_sec (e.g. it only clears ts_col). The effective mode now
+    # depends on the upsert key too (prompt 36): no watermark, OR a date marker with no PK → full.
+    new_kind = fields.get("ts_kind") or (cfg_existing.ts_kind if cfg_existing else "date")
+    pk_eff = (
+        fields.get("primary_key_columns")
+        or (cfg_existing.primary_key_columns if cfg_existing else None)
+        or streaming_service.effective_pk(db, table, cfg_existing)
+    )
+    would_full = not bool(streaming_service.upsert_key_for(new_ts_col or None, new_kind == "sequence", pk_eff))
+    if would_full:
         floor = streaming_service.FULL_RELOAD_MIN_INTERVAL
         current = int(fields.get("poll_interval_sec", cfg_existing.poll_interval_sec if cfg_existing else 0) or 0)
         if current < floor:
@@ -113,7 +121,7 @@ def put_config(
             )
 
     cfg = streaming_service.upsert_config(db, table.table, **fields)
-    return streaming_service.config_view(cfg, table)
+    return streaming_service.config_view(cfg, table, pk=streaming_service.effective_pk(db, table, cfg))
 
 
 @router.get("/status")

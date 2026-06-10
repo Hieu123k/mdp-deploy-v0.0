@@ -12,7 +12,10 @@ from fastapi.testclient import TestClient
 
 from app.services.streaming_service import (
     build_streaming_predicate,
+    config_view,
     effective_granularity,
+    is_full_reload,
+    upsert_key_for,
 )
 
 
@@ -72,6 +75,60 @@ def test_effective_granularity_gate() -> None:
     assert effective_granularity("timestamp", None) == "day"  # no time col → locked to day
     assert effective_granularity("day", "GLUPMT") == "day"
     assert effective_granularity("bogus", None) == "day"
+
+
+# --- upsert-key rule (prompt 36): PK / sequence-marker-as-key / date-no-PK → full ---------------
+
+def test_upsert_key_prefers_real_pk() -> None:
+    # A real PK is always the key, marker kind notwithstanding.
+    assert upsert_key_for("UPMJ", False, ["gldoc", "glkco"]) == ["gldoc", "glkco"]
+    assert upsert_key_for("ILUKID", True, ["ilukid"]) == ["ilukid"]
+
+
+def test_upsert_key_sequence_marker_is_its_own_key() -> None:
+    # No PK + a sequence/id marker → the marker itself is the ON CONFLICT key (F4111 ILUKID).
+    assert upsert_key_for("ILUKID", True, None) == ["ILUKID"]
+
+
+def test_upsert_key_date_no_pk_has_no_key() -> None:
+    # No PK + a date marker (not unique) → no key → must full-reload (Case B).
+    assert upsert_key_for("UPMJ", False, None) is None
+    # No marker at all → no key.
+    assert upsert_key_for(None, True, None) is None
+
+
+def _cfg(**kw):
+    from app.models.streaming_config import StreamingConfig
+
+    return StreamingConfig(source_view="V2_PRO_F4111", target_table="v2_pro_f4111", **kw)
+
+
+def test_is_full_reload_rules() -> None:
+    assert is_full_reload(_cfg(ts_col=None)) is True                                   # no marker → full
+    assert is_full_reload(_cfg(ts_col="ILUKID", ts_kind="sequence")) is False          # seq marker-as-key
+    assert is_full_reload(_cfg(ts_col="UPMJ", ts_kind="date")) is True                 # date + no PK → full
+    assert is_full_reload(_cfg(ts_col="UPMJ", ts_kind="date", primary_key_columns=["x"])) is False  # date + PK
+
+
+def test_config_view_effective_upsert_key() -> None:
+    from app.core.ora2pg_catalog import get_table
+
+    table = get_table("V2_PRO_F4111")
+    assert table is not None
+    # sequence marker, no PK → the marker is the key, mode incremental.
+    v = config_view(_cfg(ts_col="ILUKID", ts_kind="sequence"), table, pk=None)
+    assert v["effective_upsert_key"] == ["ILUKID"]
+    assert v["upsert_key_kind"] == "marker"
+    assert v["mode"] == "incremental"
+    # date marker, no PK → no key, mode full.
+    v2 = config_view(_cfg(ts_col="UPMJ", ts_kind="date"), table, pk=None)
+    assert v2["effective_upsert_key"] is None
+    assert v2["mode"] == "full"
+    # real PK wins → key is the PK, kind primary_key.
+    v3 = config_view(_cfg(ts_col="UPMJ", ts_kind="date"), table, pk=["gldoc"])
+    assert v3["effective_upsert_key"] == ["gldoc"]
+    assert v3["upsert_key_kind"] == "primary_key"
+    assert v3["mode"] == "incremental"
 
 
 # --- API (auth-gated) ------------------------------------------------------------------------

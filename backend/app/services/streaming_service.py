@@ -134,13 +134,22 @@ def upsert_config(db: Session, source_view: str, **fields: Any) -> StreamingConf
     return cfg
 
 
-def config_view(cfg: StreamingConfig | None, table: Ora2pgTable) -> dict[str, Any]:
-    """Serialise a config (saved row or catalog default) for the API."""
+def config_view(
+    cfg: StreamingConfig | None, table: Ora2pgTable, *, pk: list[str] | None = None
+) -> dict[str, Any]:
+    """Serialise a config (saved row or catalog default) for the API.
+
+    ``pk`` overrides the canonical PK (from migration_jobs) so the Streaming tab shows the same PK
+    the upsert actually uses; falls back to the config's own copy when not supplied."""
     # Authoritative: a saved row's ts_col IS the choice (None/"" → full-reload). The catalog hint is
     # only a suggestion when no row exists yet.
     ts_col = ((cfg.ts_col or "").strip() or None) if cfg else _default_ts_col(table)
     gran = effective_granularity(cfg.granularity if cfg else "day", cfg.ts_time_col if cfg else None)
-    full = not ts_col
+    ts_kind = (cfg.ts_kind if cfg else "date") or "date"
+    pk_cols = (pk if pk is not None else (cfg.primary_key_columns if cfg else None)) or None
+    # Effective ON CONFLICT key (prompt 36): PK, or the sequence marker itself, or None → full-reload.
+    upsert_key = upsert_key_for(ts_col, ts_kind == "sequence", pk_cols)
+    full = not (ts_col and upsert_key)
     return {
         "source_view": table.table,
         "target_table": table.target_table,
@@ -148,12 +157,15 @@ def config_view(cfg: StreamingConfig | None, table: Ora2pgTable) -> dict[str, An
         "enabled": bool(cfg.enabled) if cfg else False,
         "ts_col": ts_col,
         "ts_time_col": cfg.ts_time_col if cfg else None,
-        "ts_kind": (cfg.ts_kind if cfg else "date"),
+        "ts_kind": ts_kind,
         "granularity": gran,
         "poll_interval_sec": cfg.poll_interval_sec if cfg else 300,
         "lookback_days": cfg.lookback_days if cfg else 1,
-        "primary_key_columns": (cfg.primary_key_columns if cfg else None),
-        # 2-case mode (prompt 35): incremental (watermark) vs full-reload (atomic swap, ≥12h).
+        "primary_key_columns": pk_cols,
+        # Effective upsert key + its kind (prompt 36): drives the Streaming "key" badge + mode.
+        "effective_upsert_key": upsert_key,
+        "upsert_key_kind": ("primary_key" if pk_cols else ("marker" if upsert_key else None)),
+        # 2-case mode: incremental (watermark + a usable key) vs full-reload (atomic swap, ≥12h).
         "mode": "full" if full else "incremental",
         "min_interval_sec": FULL_RELOAD_MIN_INTERVAL if full else MIN_INTERVAL,
         "last_watermark": cfg.last_watermark if cfg else None,
@@ -168,7 +180,8 @@ def config_view(cfg: StreamingConfig | None, table: Ora2pgTable) -> dict[str, An
 
 def list_config_views(db: Session) -> list[dict[str, Any]]:
     saved = list_configs(db)
-    return [config_view(saved.get(t.table.upper()), t) for t in MIGRATABLE_TABLES]
+    pks = _all_job_pks(db)  # canonical PK per table (one query) so the Streaming PK cell is accurate
+    return [config_view(saved.get(t.table.upper()), t, pk=pks.get(t.target_table)) for t in MIGRATABLE_TABLES]
 
 
 # --- Oracle introspection (read-only) --------------------------------------------------------
@@ -202,6 +215,37 @@ def _job_pk(db: Session, table: Ora2pgTable) -> list[str] | None:
     return (job.primary_key_columns or None) if job is not None else None
 
 
+def _all_job_pks(db: Session) -> dict[str, list[str] | None]:
+    """Batch the canonical PK for every ora2pg migration job → {target_table: pk_columns}. One query
+    so ``list_config_views`` (40 tables) doesn't do 40 round-trips to colour the Streaming PK cell."""
+    rows = db.scalars(select(MigrationJob).where(MigrationJob.name.like("ora2pg_%"))).all()
+    out: dict[str, list[str] | None] = {}
+    for r in rows:
+        if r.name.startswith("ora2pg_"):
+            out[r.name[len("ora2pg_"):]] = (r.primary_key_columns or None)
+    return out
+
+
+def effective_pk(db: Session, table: Ora2pgTable, cfg: StreamingConfig | None) -> list[str] | None:
+    """Canonical PK for a streaming table: migration_jobs.primary_key_columns (set in the Streaming
+    PK editor / discover-keys / reference seed), else the config's own synced copy."""
+    return _job_pk(db, table) or (cfg.primary_key_columns if cfg else None)
+
+
+def upsert_key_for(ts_col: str | None, sequence: bool, pk: list[str] | None) -> list[str] | None:
+    """The effective ON CONFLICT key for Case-A streaming (prompt 36):
+      - a real PK             → the PK columns
+      - no PK + sequence marker (a unique monotonic id, e.g. ILUKID) → the marker itself is the key
+      - otherwise (no PK + date marker, or no marker) → None → the table must full-reload (Case B).
+    The marker can only be the key when it is a sequence/id: a date repeats within a day, so it can't
+    dedup. ``None`` here is exactly the Case-B signal."""
+    if pk:
+        return pk
+    if ts_col and sequence:
+        return [ts_col]
+    return None
+
+
 def _discover_pk(table: Ora2pgTable) -> list[str] | None:
     """Best-effort PK discovery for one table (reuses the ora2pg-container introspection)."""
     try:
@@ -228,32 +272,47 @@ def run_cycle(db: Session, cfg: StreamingConfig, *, force: bool = False) -> dict
 
     # Authoritative: the saved ts_col IS the choice (None/"" → Case B full-reload). No hint fallback.
     ts_col = (cfg.ts_col or "").strip() or None
+    sequence = (cfg.ts_kind or "date") == "sequence"
 
     # Canonical PK = migration_jobs.primary_key_columns (seeded from reference / set by discover-keys
-    # / the dashboard PK editor), then the config's own copy. NO live auto-discovery here: a CLEARED
-    # PK must STAY cleared (so the table deliberately falls to Case B full-reload), and a per-cycle
-    # Oracle round-trip would be wasteful. PK is configured explicitly, not re-guessed every cycle.
-    pk = _job_pk(db, table) or cfg.primary_key_columns
+    # / the Streaming PK editor), then the config's own copy. NO live auto-discovery here: a CLEARED
+    # PK must STAY cleared, and a per-cycle Oracle round-trip would be wasteful. PK is configured
+    # explicitly (now in the Streaming tab), not re-guessed every cycle.
+    pk = effective_pk(db, table, cfg)
     if pk and cfg.primary_key_columns != pk:
         cfg.primary_key_columns = pk
 
-    # ---- Case B: NO watermark column OR NO primary key → FULL-RELOAD + atomic swap ----
-    # (no ts_col = nothing to increment on; no PK = can't upsert → both fall to a full re-copy.)
-    if not ts_col or not pk:
+    # ---- Upsert-key rule (prompt 36) — the marker (watermark) decides WHICH rows to pull; the
+    # upsert key decides how to DEDUP on write. Two distinct roles:
+    #   has PK                              → Case A, ON CONFLICT(PK)
+    #   no PK + sequence marker (unique id) → Case A, the MARKER ITSELF is the key (unique index on it)
+    #   no PK + date marker (NOT unique)    → Case B full-reload (a date can't dedup: many rows/day)
+    #   no watermark column                 → Case B full-reload (nothing to increment on)
+    upsert_key = upsert_key_for(ts_col, sequence, pk)
+
+    # ---- Case B: no watermark column OR no usable upsert key → FULL-RELOAD + atomic swap ----
+    if not ts_col or not upsert_key:
         res = ora2pg_runner.full_reload_once(table, pk_columns=pk)
-        why = "no watermark column" if not ts_col else "no primary key (cleared)"
+        if not ts_col:
+            why = "no watermark column"
+        elif not pk:
+            why = "no primary key + date watermark (a date is not a unique key)"
+        else:
+            why = "no primary key"
         return _finish(
             db, cfg, table, ok=bool(res.get("ok")),
             status=("ok" if res.get("ok") else "error"), error=res.get("error"),
             rows_added=res.get("rows_added"), predicate=f"(full reload — atomic swap; {why})", extra=res,
         )
 
-    # ---- Case A: incremental (date OR sequence) — has both a watermark column AND a PK ----
+    # ---- Case A: incremental (date OR sequence) — has a watermark column AND an upsert key ----
+    # (the upsert key is the PK, or the sequence marker itself when there is no PK). The unique index
+    # the upsert needs is (re)built by streaming_pull_once → a non-unique marker fails there with a
+    # clear error and never advances the cursor / persists a bad key.
     if not ora2pg_runner.target_exists(table.target_table):
         return _finish(db, cfg, table, ok=False, status="error",
                        error="target table missing — run an initial full load before streaming")
 
-    sequence = (cfg.ts_kind or "date") == "sequence"
     gran = effective_granularity(cfg.granularity, cfg.ts_time_col)
     time_col = cfg.ts_time_col if (gran == "timestamp" and not sequence) else None
 
@@ -270,7 +329,7 @@ def run_cycle(db: Session, cfg: StreamingConfig, *, force: bool = False) -> dict
         lookback_days=cfg.lookback_days, sequence=sequence,
     )
 
-    res = ora2pg_runner.streaming_pull_once(table, where_clause=predicate, pk_columns=pk)
+    res = ora2pg_runner.streaming_pull_once(table, where_clause=predicate, pk_columns=upsert_key)
 
     if res.get("ok"):
         d2, t2 = ora2pg_runner.target_max_watermark(table.target_table, ts_col, time_col, numeric=sequence)
@@ -333,10 +392,18 @@ FULL_RELOAD_DEFAULT_INTERVAL = 86400  # 24h
 
 
 def is_full_reload(cfg: StreamingConfig) -> bool:
-    """A table streams in full-reload mode when its SAVED ts_col is empty (authoritative — same rule
-    as run_cycle / config_view; NO catalog-hint fallback, else the 12h floor would be bypassed for
-    the hint tables F0911/F0411/F4311)."""
-    return not ((cfg.ts_col or "").strip() or None)
+    """A table streams in full-reload mode (12h floor) when it has no usable upsert key for an
+    incremental pull (prompt 36 — same rule as run_cycle / config_view; NO catalog-hint fallback):
+      - no watermark column                 → full
+      - sequence marker (the marker is its own key) → incremental
+      - date marker WITH a PK               → incremental (ON CONFLICT(PK))
+      - date marker WITHOUT a PK            → full (a date can't dedup).
+    Uses cfg.primary_key_columns (kept synced from the canonical job PK by run_cycle)."""
+    ts_col = (cfg.ts_col or "").strip() or None
+    if not ts_col:
+        return True
+    sequence = (cfg.ts_kind or "date") == "sequence"
+    return not bool(upsert_key_for(ts_col, sequence, cfg.primary_key_columns or None))
 
 
 def effective_interval(cfg: StreamingConfig) -> int:

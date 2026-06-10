@@ -792,9 +792,20 @@ def streaming_pull_once(
             result["log"] = log_tail
             return result
 
-        # Tag streamed rows with this cycle id, and (re)ensure the unique PK index ON CONFLICT needs.
+        # Tag streamed rows with this cycle id, and (re)ensure the unique key index ON CONFLICT needs.
+        # The key may be a real PK or a sequence marker used as the key (prompt 36); either way the
+        # unique index must build — a non-unique key column fails HERE with a clear error (no crash,
+        # no cursor advance, nothing persisted), which is exactly the "marker is not unique" signal.
         _ensure_audit_cols(settings.ora2pg_target_schema, table.target_table, run_id)
-        _ensure_unique_index(settings.ora2pg_target_schema, table.target_table, pk_columns)
+        try:
+            _ensure_unique_index(settings.ora2pg_target_schema, table.target_table, pk_columns)
+        except Exception as exc:
+            result["error"] = (
+                f"cannot build the unique upsert key on ({', '.join(pk_columns)}): {exc} — the key "
+                "column(s) are not unique in the target (a sequence marker used as the key must be unique)"
+            )
+            result["log"] = log_tail[-40:]
+            return result
 
         rows_before = _count_target(table.target_table)
         started = time.monotonic()
