@@ -149,6 +149,14 @@ def test_list_config_returns_catalog_defaults(client: TestClient, auth_headers: 
 
 
 def test_put_config_enable_and_set_ts_col(client: TestClient, auth_headers: dict[str, str]) -> None:
+    # F0911 carries a reference PK in production, so a date watermark + PK is INCREMENTAL (the chosen
+    # poll interval is honoured, NOT clamped to the full-reload floor). Mirror production by setting a
+    # PK first (prompt 36: a date marker with NO PK would instead be full-reload → clamped to 12h).
+    client.put(
+        "/ora2pg/tables/V2_PRO_F0911/primary-key",
+        headers=auth_headers,
+        json={"pk_columns": ["glkco", "gldoc"]},
+    )
     r = client.put(
         "/streaming/config/V2_PRO_F0911",
         headers=auth_headers,
@@ -159,7 +167,40 @@ def test_put_config_enable_and_set_ts_col(client: TestClient, auth_headers: dict
     assert body["enabled"] is True
     assert body["ts_col"] == "GLUPMJ"
     assert body["lookback_days"] == 2
-    assert body["poll_interval_sec"] == 120
+    assert body["poll_interval_sec"] == 120  # incremental (date + PK) → not clamped
+    assert body["mode"] == "incremental"
+    assert body["effective_upsert_key"] == ["glkco", "gldoc"]
+
+
+def test_put_config_date_no_pk_clamps_to_full_reload_floor(client: TestClient, auth_headers: dict[str, str]) -> None:
+    # Prompt 36: a date watermark with NO PK can't dedup → full-reload → poll clamped to the 12h floor.
+    r = client.put(
+        "/streaming/config/V2_PRO_F0911",
+        headers=auth_headers,
+        json={"enabled": True, "ts_col": "GLUPMJ", "ts_kind": "date", "poll_interval_sec": 120},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["mode"] == "full"
+    assert body["effective_upsert_key"] is None
+    assert body["poll_interval_sec"] == 43200  # clamped to FULL_RELOAD_MIN_INTERVAL
+
+
+def test_put_config_sequence_marker_no_pk_is_incremental(client: TestClient, auth_headers: dict[str, str]) -> None:
+    # Prompt 36: a sequence/id marker is its own upsert key → incremental even with no PK (poll
+    # honoured). Uses GLUPMJ (a real F0911 column) so the ts_col-exists check passes on an
+    # Oracle-reachable host; kind=sequence is what exercises the marker-as-key routing here.
+    r = client.put(
+        "/streaming/config/V2_PRO_F0911",
+        headers=auth_headers,
+        json={"enabled": True, "ts_col": "GLUPMJ", "ts_kind": "sequence", "poll_interval_sec": 30},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["mode"] == "incremental"
+    assert body["effective_upsert_key"] == ["GLUPMJ"]
+    assert body["upsert_key_kind"] == "marker"
+    assert body["poll_interval_sec"] == 30  # incremental → not clamped
 
 
 def test_put_config_rejects_bad_granularity(client: TestClient, auth_headers: dict[str, str]) -> None:
