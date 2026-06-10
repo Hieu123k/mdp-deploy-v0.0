@@ -2,7 +2,6 @@
 
 import { useCallback, useEffect, useState } from "react";
 import {
-  ClipboardList,
   Eye,
   History,
   Pencil,
@@ -544,6 +543,9 @@ export default function MigrationJobsPage() {
     setTemplateForm((current) => ({ ...current, [key]: value }));
   }
 
+  // Retained (prompt 33 keeps the create/template modals + APIs) but no longer wired to a header
+  // button — the dashboard drives migrations from the reference catalog now.
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   async function openTemplateCreate() {
     setTemplateOpen(true);
     setTemplateLoading(true);
@@ -567,6 +569,7 @@ export default function MigrationJobsPage() {
     setTemplateForm(emptyTemplateForm(template));
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   function openCreateJob() {
     setModalError(null);
     setEditingJobId(null);
