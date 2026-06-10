@@ -313,6 +313,7 @@ def _resolve_join_plan(
     alias_by_table: dict[tuple[str, str], str] = {base: "t0"}
     added: set[tuple[str, str]] = {base}
     ordered: list[dict[str, Any]] = []
+    emitted_by_right: dict[tuple[str, str], dict[str, Any]] = {}
     remaining = list(parsed)
     progressed = True
     while progressed and remaining:
@@ -325,11 +326,39 @@ def _resolve_join_plan(
                     alias_by_table[p["right_st"]] = f"t{len(alias_by_table)}"
                     added.add(p["right_st"])
                     ordered.append(p)
+                    emitted_by_right[p["right_st"]] = p
+                    # INNER joins can DROP base rows that have no match (a by-key lookup of such a row
+                    # then 404s) — make that explicit rather than silent.
+                    if p["type"] == "inner":
+                        warnings.append({
+                            "field": f"relationships[{p['i']}]",
+                            "message": (
+                                f"INNER JOIN to {p['rt']} drops rows with no match (a primary-key lookup "
+                                "of a dropped row returns 404). Use a LEFT join to keep them."
+                            ),
+                        })
                 else:
-                    warnings.append({
-                        "field": f"relationships[{p['i']}]",
-                        "message": f"redundant join: {p['rt']} is already reachable; the extra edge is ignored",
-                    })
+                    # A second edge reaching an already-joined table (diamond / a join INTO the base).
+                    # If it differs from the emitted edge (type or ON columns), silently dropping it
+                    # would change which rows the query returns → HARD ERROR (don't guess intent).
+                    kept = emitted_by_right.get(p["right_st"])
+                    same = kept is not None and (p["type"], p["left_st"], p["lc"], p["rc"]) == (
+                        kept["type"], kept["left_st"], kept["lc"], kept["rc"]
+                    )
+                    if same:
+                        warnings.append({
+                            "field": f"relationships[{p['i']}]",
+                            "message": f"duplicate identical join to {p['rt']} ignored",
+                        })
+                    else:
+                        errors.append({
+                            "field": f"relationships[{p['i']}]",
+                            "message": (
+                                f"conflicting join: {p['rt']} is already joined a different way (type or "
+                                "ON columns differ, or this joins into the base) — remove the duplicate "
+                                "edge or make the two joins identical."
+                            ),
+                        })
             else:
                 still.append(p)
         remaining = still

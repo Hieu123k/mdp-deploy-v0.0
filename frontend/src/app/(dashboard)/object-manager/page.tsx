@@ -236,9 +236,14 @@ function modelSource(model: DataModel): string {
 
 function typeBSource(model: DataModel | FormState): { source_schema: string; source_table: string } {
   const attrs = model.attributes || [];
+  // The base table is the PRIMARY-KEY attribute's table (mirrors the backend); fall back to the
+  // first attribute carrying a source only when no PK is set yet.
+  const pkName = model.primary_key || attrs.find((attribute) => attribute.is_primary_key)?.name;
+  const pkAttr = pkName ? attrs.find((attribute) => attribute.name === pkName) : undefined;
+  const base = (pkAttr?.source_table ? pkAttr : attrs.find((attribute) => attribute.source_table)) || undefined;
   return {
-    source_schema: attrs.find((attribute) => attribute.source_schema)?.source_schema || "",
-    source_table: attrs.find((attribute) => attribute.source_table)?.source_table || "",
+    source_schema: base?.source_schema || attrs.find((attribute) => attribute.source_schema)?.source_schema || "",
+    source_table: base?.source_table || attrs.find((attribute) => attribute.source_table)?.source_table || "",
   };
 }
 
@@ -568,10 +573,18 @@ export default function DataModelsPage() {
   }
 
   function buildPayload(): DataModelCreate {
+    // A joined attribute's schema must match the schema of the join that brings its table in (not
+    // blindly the base schema) so cross-schema joins pass the backend connectivity check.
+    const joins = form.type === "B" ? form.relationships : [];
+    const schemaForTable = (table: string): string => {
+      if (!table || table === sourceTable) return sourceSchema;
+      return joins.find((join) => join.right?.table === table)?.right?.schema || sourceSchema;
+    };
     const attributes = form.attributes
       .filter((attribute) => attribute.name.trim())
       .map((attribute) => {
         const name = snake(attribute.name);
+        const table = form.type === "B" ? attribute.source_table || sourceTable : attribute.source_table;
         return {
           ...attribute,
           name,
@@ -579,15 +592,20 @@ export default function DataModelsPage() {
           description: emptyToNull(attribute.description || ""),
           sensitivity: emptyToNull(attribute.sensitivity || ""),
           // Per-attribute source overrides the base table (multi-table, prompt 38); blank = base.
-          source_schema: form.type === "B" ? attribute.source_schema || sourceSchema : attribute.source_schema || undefined,
-          source_table: form.type === "B" ? attribute.source_table || sourceTable : attribute.source_table || undefined,
+          source_schema: form.type === "B" ? schemaForTable(table || "") : attribute.source_schema || undefined,
+          source_table: form.type === "B" ? table || undefined : attribute.source_table || undefined,
           source_column: attribute.source_column || undefined,
           is_primary_key: attribute.is_primary_key || name === form.primary_key,
         };
       });
     const primary = form.primary_key || attributes.find((attribute) => attribute.is_primary_key)?.name || "";
+    // Blank "Left table" defaults to the base table (honours the field's placeholder) before filtering.
     const relationships =
-      form.type === "B" ? form.relationships.filter(isCompleteJoin) : null;
+      form.type === "B"
+        ? form.relationships
+            .map((join) => ({ ...join, left: { ...join.left, table: join.left.table || sourceTable } }))
+            .filter(isCompleteJoin)
+        : null;
     return {
       relationships: relationships && relationships.length ? relationships : null,
       name: snake(form.name),
@@ -1298,7 +1316,7 @@ export default function DataModelsPage() {
             <button
               type="button"
               disabled={mode === "edit"}
-              onClick={() => patchForm({ type: "A", source_layer: "generated_table", attributes: initialForm().attributes })}
+              onClick={() => patchForm({ type: "A", source_layer: "generated_table", attributes: initialForm().attributes, relationships: [] })}
               className={cn(
                 "rounded-lg border px-4 py-3 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-75",
                 form.type === "A" ? "border-brand bg-brand/10" : "border-neutral-200 hover:border-brand/40",
@@ -1642,7 +1660,7 @@ export default function DataModelsPage() {
                         aria-label="Source column"
                         placeholder="source_column"
                         value={attribute.source_column || ""}
-                        onChange={(event) => updateAttribute(index, { source_column: event.target.value })}
+                        onChange={(event) => updateAttribute(index, { source_column: event.target.value.trim() })}
                         className="h-7 font-mono text-[11px]"
                       />
                     )}

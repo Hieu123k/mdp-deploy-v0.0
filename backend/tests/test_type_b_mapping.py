@@ -530,3 +530,28 @@ def test_mt8_injection_in_join_rejected(client: TestClient, auth_headers: dict[s
     assert r.status_code == 422
     # the injection never executed — the table is intact
     assert db_session.execute(text("SELECT count(*) FROM dm_t_head")).scalar() == 2
+
+
+def test_mt9_conflicting_duplicate_join_rejected(client: TestClient, auth_headers: dict[str, str], db_session: Session) -> None:
+    # Prompt 38 review fix: two edges to the same table that DIFFER (type/ON) must be a hard error,
+    # not a silently-dropped edge (which would change which rows the query returns).
+    seed_mt_tables(db_session)
+    j1 = {"type": "left", "left": {"table": "dm_t_head", "column": "lookup_code"},
+          "right": {"schema": "mdp_staging", "table": "dm_t_lookup", "column": "lookup_code"}}
+    j2 = {"type": "inner", "left": {"table": "dm_t_head", "column": "lookup_code"},
+          "right": {"schema": "mdp_staging", "table": "dm_t_lookup", "column": "lookup_code"}}
+    attrs = [_attr("head_id", "head_id", pk=True), _attr("lookup_name", "lookup_name", table="dm_t_lookup")]
+    r = client.post("/data-models/type-b/validate-mapping", headers=auth_headers, json=_mt_model("mt9", attrs, [j1, j2]))
+    assert r.status_code == 422
+    assert "conflicting join" in str(r.json()["detail"])
+
+
+def test_mt10_inner_join_warns(client: TestClient, auth_headers: dict[str, str], db_session: Session) -> None:
+    # Prompt 38 review fix: an INNER join (which can drop base rows) is no longer silent — it warns.
+    seed_mt_tables(db_session)
+    j = {"type": "inner", "left": {"table": "dm_t_head", "column": "lookup_code"},
+         "right": {"schema": "mdp_staging", "table": "dm_t_lookup", "column": "lookup_code"}}
+    attrs = [_attr("head_id", "head_id", pk=True), _attr("lookup_name", "lookup_name", table="dm_t_lookup")]
+    r = client.post("/data-models/type-b/validate-mapping", headers=auth_headers, json=_mt_model("mt10", attrs, [j]))
+    assert r.status_code == 200, r.json()
+    assert any("INNER JOIN" in w["message"] for w in r.json()["warnings"])
