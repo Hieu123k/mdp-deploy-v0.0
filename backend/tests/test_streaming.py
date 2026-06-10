@@ -203,6 +203,29 @@ def test_put_config_sequence_marker_no_pk_is_incremental(client: TestClient, aut
     assert body["poll_interval_sec"] == 30  # incremental → not clamped
 
 
+def test_put_config_ignores_primary_key_columns(client: TestClient, auth_headers: dict[str, str]) -> None:
+    # Prompt 36 review fix: the PK/upsert key is pk.edit-gated — streaming.configure must NOT be able
+    # to set it through the streaming PUT back door. The field is stripped before persist.
+    r = client.put(
+        "/streaming/config/V2_PRO_F0911",
+        headers=auth_headers,
+        json={"enabled": True, "primary_key_columns": ["sneaky_col"]},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["primary_key_columns"] != ["sneaky_col"]  # back-door value never persisted
+
+
+def test_put_config_rejects_bad_ts_time_col(client: TestClient, auth_headers: dict[str, str]) -> None:
+    # Prompt 36 review fix: ts_time_col is interpolated into the WHERE predicate → identifier-gated.
+    r = client.put(
+        "/streaming/config/V2_PRO_F0911",
+        headers=auth_headers,
+        json={"ts_time_col": "glupmt; drop table x"},
+    )
+    assert r.status_code == 400
+
+
 def test_put_config_rejects_bad_granularity(client: TestClient, auth_headers: dict[str, str]) -> None:
     r = client.put("/streaming/config/V2_PRO_F0911", headers=auth_headers, json={"granularity": "weekly"})
     assert r.status_code == 400

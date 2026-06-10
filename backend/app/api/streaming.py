@@ -64,6 +64,10 @@ def put_config(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown table")
 
     fields = payload.model_dump(exclude_none=True)
+    # PK / upsert key is pk.edit-gated: it MUST NOT be settable through streaming.configure. Strip it
+    # here so a streaming.configure-only role can never write the upsert key via this back door (the FE
+    # configures PK only through the pk.edit ora2pg endpoints, which sync streaming_configs).
+    fields.pop("primary_key_columns", None)
     if "granularity" in fields and fields["granularity"] not in streaming_service.GRANULARITIES:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="granularity must be day|timestamp")
     if "ts_kind" in fields and fields["ts_kind"] not in ("date", "sequence"):
@@ -86,6 +90,12 @@ def put_config(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"ts_col '{new_ts_col}' not found in view {table.table} (columns probed: {len(cols)})",
             )
+
+    # ts_time_col is interpolated into the WHERE predicate too → identifier-gate it unconditionally
+    # (same as ts_col), independent of the granularity field, so a two-request or off-Oracle path can't
+    # smuggle a non-identifier into the predicate.
+    if fields.get("ts_time_col") and not _TS_COL_RE.fullmatch(fields["ts_time_col"]):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="ts_time_col must be a column name (letters/digits/underscore)")
 
     # Case-B (full-reload) interval floor: a full-reload table copies the WHOLE view every cycle →
     # clamp poll_interval_sec to the 12h hard floor whenever the EFFECTIVE mode is full, even if this
@@ -120,7 +130,20 @@ def put_config(
                 detail=f"ts_time_col '{ts_time}' not found in view {table.table} (columns probed: {len(cols)})",
             )
 
+    # If the watermark column/kind changes, the old cursor belongs to a different value space → reset
+    # it so the next cycle re-initialises from the target's MAX(new column) instead of comparing the
+    # new column against a stale cursor.
+    marker_changed = (
+        ("ts_col" in fields and new_ts_col != ((cfg_existing.ts_col or "").strip() if cfg_existing else ""))
+        or ("ts_kind" in fields and fields["ts_kind"] != ((cfg_existing.ts_kind if cfg_existing else "date") or "date"))
+    )
+
     cfg = streaming_service.upsert_config(db, table.table, **fields)
+    if marker_changed:
+        cfg.last_watermark = None
+        cfg.last_watermark_time = None
+        db.commit()
+        db.refresh(cfg)
     return streaming_service.config_view(cfg, table, pk=streaming_service.effective_pk(db, table, cfg))
 
 

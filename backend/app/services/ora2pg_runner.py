@@ -268,11 +268,37 @@ def _worker_then_cleanup(worker: Any, run_id: str, *wargs: Any) -> None:
 _PK_IDENT_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 
 
+def _index_columns(cur: Any, schema: str, index_name: str) -> tuple[list[str], bool]:
+    """Return (ordered indexed column names, is_unique) for ``index_name`` in ``schema``; ([], False)
+    when it doesn't exist. Used to reconcile an existing ux_<target>_pk against the wanted columns."""
+    cur.execute(
+        """
+        SELECT a.attname, ix.indisunique
+        FROM pg_class i
+        JOIN pg_index ix ON ix.indexrelid = i.oid
+        JOIN pg_class t ON t.oid = ix.indrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        JOIN LATERAL unnest(ix.indkey) WITH ORDINALITY AS k(attnum, ord) ON TRUE
+        JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum
+        WHERE n.nspname = %s AND i.relname = %s
+        ORDER BY k.ord
+        """,
+        (schema, index_name),
+    )
+    rows = cur.fetchall()
+    return [r[0] for r in rows], (bool(rows) and bool(rows[0][1]))
+
+
 def _ensure_unique_index(schema: str, target: str, pk_columns: list[str]) -> None:
-    """Create a UNIQUE index on the target PK columns (idempotent). Required for PK-repair:
-    `INSERT … ON CONFLICT DO NOTHING` only skips existing rows when a unique constraint/index
-    backs the conflict. PK columns may originate from the admin PK editor, so every name is
-    identifier-validated before it is interpolated into the DDL (defence against injection)."""
+    """Ensure ``ux_<target>_pk`` is a UNIQUE index on EXACTLY ``pk_columns`` (lower-cased), reconciling
+    COLUMNS — not just the index name. ``INSERT … ON CONFLICT DO NOTHING`` is emitted with NO explicit
+    conflict target, so Postgres dedups against ANY unique index on the table: a STALE ux_<target>_pk
+    left on different columns (e.g. after a sequence-marker swap) would silently dedup on the WRONG
+    key and drop rows. We therefore DROP+rebuild when the columns differ. The rebuild is atomic (build
+    a temp index, drop old, rename) so a NON-UNIQUE key fails the CREATE — raising a clear error to the
+    caller's guard (streaming cycle / PK editor) and leaving the prior index intact. PK columns may
+    come from the admin PK editor or a sequence marker used as the key, so every name is
+    identifier-validated before any DDL (defence against injection)."""
     if not pk_columns:
         return
     cols_lower = [c.lower() for c in pk_columns]
@@ -281,10 +307,23 @@ def _ensure_unique_index(schema: str, target: str, pk_columns: list[str]) -> Non
         raise ValueError(f"invalid PK column identifier(s): {', '.join(bad)}")
     cols = ", ".join(f'"{c}"' for c in cols_lower)
     idx = f"ux_{target}_pk"[:63]
+    tmp = f"ux_{target}_pk_new"[:63]
     with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
         raw = conn.connection
         with raw.cursor() as cur:
-            cur.execute(f'CREATE UNIQUE INDEX IF NOT EXISTS "{idx}" ON "{schema}"."{target}" ({cols})')
+            existing, is_unique = _index_columns(cur, schema, idx)
+            if existing == cols_lower and is_unique:
+                return  # already the exact unique key — nothing to do
+            if existing:
+                # A stale/non-matching index owns the canonical name → atomic rebuild so the physical
+                # index matches the current upsert key. A non-unique key fails the temp CREATE (raises).
+                cur.execute(f'DROP INDEX IF EXISTS "{schema}"."{tmp}"')
+                cur.execute(f'CREATE UNIQUE INDEX "{tmp}" ON "{schema}"."{target}" ({cols})')
+                cur.execute(f'DROP INDEX IF EXISTS "{schema}"."{idx}"')
+                cur.execute(f'ALTER INDEX "{schema}"."{tmp}" RENAME TO "{idx}"')
+            else:
+                # No index of this name → create it (a non-unique key raises here, as required).
+                cur.execute(f'CREATE UNIQUE INDEX "{idx}" ON "{schema}"."{target}" ({cols})')
 
 
 def _copy_stream(

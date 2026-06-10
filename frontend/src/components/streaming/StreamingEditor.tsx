@@ -62,9 +62,11 @@ export function StreamingEditor() {
   const [cols, setCols] = useState<Record<string, string[] | "loading">>({});
 
   // PK config moved here from Migration Jobs (prompt 36): PK is the streaming upsert key, so it is
-  // configured next to the marker. Reuses the auth-gated ora2pg PK endpoints (require pk.edit).
+  // configured next to the marker. Reuses the auth-gated ora2pg PK endpoints (require pk.edit) — which
+  // the backend grants to admin AND data_engineer (DEFAULT_ROLE_PERMISSIONS), so gate the controls on
+  // the same parity rather than admin-only (else an empowered data_engineer sees no PK controls).
   const { user } = useAuth();
-  const isAdmin = user?.role === "admin";
+  const canEditPk = user?.role === "admin" || user?.role === "data_engineer";
   const [pkEdit, setPkEdit] = useState<string | null>(null);
   const [pkDraft, setPkDraft] = useState<string>("");
   const [pkBusy, setPkBusy] = useState<string | null>(null);
@@ -355,7 +357,7 @@ export function StreamingEditor() {
                             ) : (
                               <span className="text-neutral-400" title="No upsert key — table full-reloads">—</span>
                             )}
-                            {isAdmin && (
+                            {canEditPk && (
                               <>
                                 <Button
                                   size="sm"

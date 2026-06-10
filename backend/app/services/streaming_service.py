@@ -391,36 +391,47 @@ FULL_RELOAD_MIN_INTERVAL = 43200   # 12h
 FULL_RELOAD_DEFAULT_INTERVAL = 86400  # 24h
 
 
-def is_full_reload(cfg: StreamingConfig) -> bool:
+def is_full_reload(cfg: StreamingConfig, pk: list[str] | None = None) -> bool:
     """A table streams in full-reload mode (12h floor) when it has no usable upsert key for an
     incremental pull (prompt 36 — same rule as run_cycle / config_view; NO catalog-hint fallback):
       - no watermark column                 → full
       - sequence marker (the marker is its own key) → incremental
       - date marker WITH a PK               → incremental (ON CONFLICT(PK))
       - date marker WITHOUT a PK            → full (a date can't dedup).
-    Uses cfg.primary_key_columns (kept synced from the canonical job PK by run_cycle)."""
+    ``pk`` should be the CANONICAL PK (effective_pk); falls back to the config's synced copy so the
+    scheduling floor agrees with config_view / put_config (which use effective_pk) instead of a
+    possibly-stale cfg copy."""
     ts_col = (cfg.ts_col or "").strip() or None
     if not ts_col:
         return True
     sequence = (cfg.ts_kind or "date") == "sequence"
-    return not bool(upsert_key_for(ts_col, sequence, cfg.primary_key_columns or None))
+    pk_cols = pk if pk is not None else (cfg.primary_key_columns or None)
+    return not bool(upsert_key_for(ts_col, sequence, pk_cols))
 
 
-def effective_interval(cfg: StreamingConfig) -> int:
+def effective_interval(cfg: StreamingConfig, pk: list[str] | None = None) -> int:
     """The real cadence floor for a table: incremental → MIN_INTERVAL; full-reload → 12h floor."""
-    if is_full_reload(cfg):
+    if is_full_reload(cfg, pk):
         return max(FULL_RELOAD_MIN_INTERVAL, int(cfg.poll_interval_sec or FULL_RELOAD_DEFAULT_INTERVAL))
     return max(MIN_INTERVAL, int(cfg.poll_interval_sec or 60))
 
 
 def run_all_due(db: Session) -> dict[str, Any]:
     """Run a cycle for every enabled config that is due, and report the sleep the poll loop should
-    use next = the smallest enabled effective interval (full-reload tables floored at 12h)."""
+    use next = the smallest enabled effective interval (full-reload tables floored at 12h). The
+    full-reload decision uses the CANONICAL job PK (batched) so an incremental table whose PK lives
+    only in migration_jobs is never throttled to the 12h floor."""
     now = datetime.now(timezone.utc)
+    pks = _all_job_pks(db)
+
+    def _pk_for(cfg: StreamingConfig) -> list[str] | None:
+        t = get_table(cfg.source_view)
+        return (pks.get(t.target_table) if t else None) or (cfg.primary_key_columns or None)
+
     results: list[dict[str, Any]] = []
     enabled = db.scalars(select(StreamingConfig).where(StreamingConfig.enabled.is_(True))).all()
     for cfg in enabled:
-        interval = effective_interval(cfg)
+        interval = effective_interval(cfg, _pk_for(cfg))
         if cfg.last_run_at is not None:
             last = cfg.last_run_at
             if last.tzinfo is None:
@@ -428,6 +439,6 @@ def run_all_due(db: Session) -> dict[str, Any]:
             if (now - last).total_seconds() < interval:
                 continue  # not due yet
         results.append(run_cycle(db, cfg))
-    intervals = [effective_interval(c) for c in enabled]
+    intervals = [effective_interval(c, _pk_for(c)) for c in enabled]
     next_interval = min(intervals) if intervals else None
     return {"ran": len(results), "results": results, "next_interval": next_interval}
