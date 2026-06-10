@@ -7,6 +7,7 @@ container, so it is exercised in the on-VM demo (report 27), not here — but th
 """
 from __future__ import annotations
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.services.streaming_service import (
@@ -132,12 +133,18 @@ def test_status_shape(client: TestClient, auth_headers: dict[str, str]) -> None:
 
 
 def test_run_once_is_graceful_without_oracle(client: TestClient, auth_headers: dict[str, str]) -> None:
-    # No Oracle / no ora2pg container in tests → the cycle returns a clean error (never 500).
+    # No Oracle / no ora2pg container → the cycle returns a clean error, never a 500.
+    # Env-sensitive: with no ts_col configured, F0911 now runs Case-B full-reload (prompt 35). On an
+    # Oracle-capable host (mdp2 / tipa-mdp during deploy) that reload genuinely SUCCEEDS (ok=True) —
+    # correct behaviour, not a failure — so we only assert the graceful-error contract when Oracle is
+    # unreachable. Either way the response must be 200 (never 500).
     r = client.post("/streaming/run-once/V2_PRO_F0911", headers=auth_headers)
     assert r.status_code == 200
     body = r.json()
+    if body["ok"]:
+        pytest.skip("Oracle reachable — full-reload succeeded; the no-Oracle contract does not apply")
     assert body["ok"] is False
-    assert body["error"]  # a clear message (no PK / target missing / oracle unreachable)
+    assert body["error"]  # a clear message (target missing / oracle unreachable)
 
 
 # --- report-29 behaviour: per-table enable = the control; single cadence (no 30s floor / 60s tick) ---
