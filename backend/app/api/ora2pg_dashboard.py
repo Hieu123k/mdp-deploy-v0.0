@@ -854,3 +854,50 @@ def set_primary_key(
         "index_error": index_error,
         "message": "PK saved." + ("" if index_rebuilt else f" Index not unique-built: {index_error}"),
     }
+
+
+@router.delete("/tables/{table_name}/primary-key")
+def clear_primary_key(
+    table_name: str,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permission("pk.edit"))],
+) -> dict[str, Any]:
+    """Clear/Delete a table's primary key (admin/pk.edit): empties ``primary_key_columns`` + clears
+    pk_source + DROPs the target's unique index ``ux_<target>_pk``. DATA-SAFETY: only the INDEX is
+    dropped — the table and all rows are untouched. Consequence: with no PK the table can't upsert,
+    so streaming falls back to Case B (full-reload)."""
+    table = get_table(table_name)
+    if table is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown table")
+
+    # Drop ONLY the unique index (keep the data). Atomic-swap full-reloads keep this canonical name.
+    idx = f"ux_{table.target_table}_pk"[:63]
+    dropped = False
+    try:
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            conn.exec_driver_sql(f'DROP INDEX IF EXISTS "{settings.ora2pg_target_schema}"."{idx}"')
+            dropped = True
+    except Exception as exc:  # don't fail the clear just because the index couldn't be dropped
+        logger_warn = str(exc)[:200]
+    else:
+        logger_warn = None
+
+    job = _get_or_create_job(db, table)
+    job.primary_key_columns = None
+    cfg = dict(job.config or {})
+    cfg.pop("pk_source", None)
+    cfg.pop("pk_name_match", None)
+    cfg.pop("pk_type", None)
+    cfg.pop("pk_vanilla", None)
+    job.config = cfg
+    db.add(job)
+    _sync_streaming_pk(db, table.table, None)  # streaming now has no PK → Case B full-reload
+    db.commit()
+
+    return {
+        "table": table.table,
+        "pk_columns": None,
+        "index_dropped": dropped,
+        "index_error": logger_warn,
+        "message": f"PK cleared — unique index '{idx}' dropped (data kept). Streaming for this table now uses full-reload.",
+    }

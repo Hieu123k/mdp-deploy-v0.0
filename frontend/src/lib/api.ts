@@ -853,6 +853,12 @@ export const ora2pgSetPrimaryKey = (table: string, pk_columns: string[]) =>
     method: "PUT",
     body: JSON.stringify({ pk_columns }),
   });
+/** Clear PK (admin/pk.edit): empties pk + DROPs the unique index. Keeps all data. → streaming full-reload. */
+export const ora2pgClearPrimaryKey = (table: string) =>
+  req<{ table: string; index_dropped: boolean; message: string }>(
+    `/ora2pg/tables/${encodeURIComponent(table)}/primary-key`,
+    { method: "DELETE" },
+  );
 
 /** Download the reconciliation log (json|csv) via an authed fetch + blob. */
 export async function ora2pgDownloadReconciliation(format: "json" | "csv"): Promise<void> {

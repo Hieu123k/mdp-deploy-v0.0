@@ -19,6 +19,7 @@ import {
   ora2pgListTables,
   ora2pgRepair,
   ora2pgSetPrimaryKey,
+  ora2pgClearPrimaryKey,
   ora2pgStart,
   ora2pgStreamRun,
   ora2pgVerify,
@@ -182,6 +183,30 @@ export function Ora2pgMigrationDashboard() {
       }
     },
     [pkDraft, loadTables],
+  );
+
+  const onClearPk = useCallback(
+    async (table: string) => {
+      if (
+        !window.confirm(
+          `Clear the primary key for ${table}?\n\nThis DROPS the unique index only — ALL ROWS ARE KEPT. ` +
+            `With no PK the table can't upsert, so streaming for it falls back to full-reload.`,
+        )
+      )
+        return;
+      setPkBusy(table);
+      setPkMsg(null);
+      try {
+        const r = await ora2pgClearPrimaryKey(table);
+        setPkMsg(`${table}: ${r.message}`);
+        await loadTables();
+      } catch (e) {
+        setPkMsg(e instanceof ApiError ? e.message : "Clear PK failed");
+      } finally {
+        setPkBusy(null);
+      }
+    },
+    [loadTables],
   );
 
   const onVerify = useCallback(
@@ -668,6 +693,17 @@ export function Ora2pgMigrationDashboard() {
                             title="Edit PK (admin)"
                           >
                             Edit
+                          </Button>
+                        )}
+                        {isAdmin && t.pk_columns && t.pk_columns.length > 0 && (
+                          <Button
+                            size="sm"
+                            variant="destructive"
+                            disabled={pkBusy === t.table}
+                            onClick={() => void onClearPk(t.table)}
+                            title="Clear PK — drops the unique index (keeps data); streaming → full-reload"
+                          >
+                            Clear PK
                           </Button>
                         )}
                       </div>
