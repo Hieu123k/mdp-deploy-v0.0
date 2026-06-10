@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import threading
 import time
 import uuid
@@ -225,10 +226,43 @@ def _open_ora2pg() -> tuple[Any, Any]:
     return client.api, container
 
 
-def _write_conf(conf: str) -> None:
-    os.makedirs(settings.ora2pg_shared_dir, exist_ok=True)
-    with open(os.path.join(settings.ora2pg_shared_dir, "ora2pg.conf"), "w", encoding="utf-8") as fh:
+def _run_conf_paths(run_id: str) -> tuple[str, str]:
+    """Per-run conf isolation (prompt 34): each ora2pg run gets its OWN dir so concurrent runs
+    (streaming-loop + a manual migrate/verify) never overwrite each other's conf. Returns
+    (backend_dir, container_dir): the same volume, seen as ``ora2pg_shared_dir`` by the backend and
+    ``/config`` inside the ora2pg container."""
+    sub = f"run_{run_id}"
+    return os.path.join(settings.ora2pg_shared_dir, sub), f"/config/{sub}"
+
+
+def _write_conf(conf: str, run_id: str) -> tuple[str, str]:
+    """Write the per-run ora2pg.conf into its isolated dir. The conf carries Oracle credentials →
+    stays in the (gitignored) volume only, chmod 600. Returns (backend_dir, container_dir)."""
+    backend_dir, container_dir = _run_conf_paths(run_id)
+    os.makedirs(backend_dir, exist_ok=True)
+    path = os.path.join(backend_dir, "ora2pg.conf")
+    with open(path, "w", encoding="utf-8") as fh:
         fh.write(conf)
+    try:
+        os.chmod(path, 0o600)
+    except Exception:  # pragma: no cover - best effort on filesystems without chmod
+        pass
+    return backend_dir, container_dir
+
+
+def _cleanup_run_conf(run_id: str) -> None:
+    """Remove a run's conf dir (called after every run, success or fail) so per-run confs — and the
+    streaming cycle that runs every few minutes — never pile up in the volume."""
+    backend_dir, _ = _run_conf_paths(run_id)
+    shutil.rmtree(backend_dir, ignore_errors=True)
+
+
+def _worker_then_cleanup(worker: Any, run_id: str, *wargs: Any) -> None:
+    """Thread target wrapper: run the worker, then ALWAYS drop its per-run conf dir."""
+    try:
+        worker(run_id, *wargs)
+    finally:
+        _cleanup_run_conf(run_id)
 
 
 _PK_IDENT_RE = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -255,7 +289,7 @@ def _ensure_unique_index(schema: str, target: str, pk_columns: list[str]) -> Non
 
 def _copy_stream(
     api: Any, container_id: str, run_id: str, started: float, log_tail: list[str], *,
-    action: str = "COPY", total_hint: int | None = None,
+    action: str = "COPY", total_hint: int | None = None, conf_path: str = "/config/ora2pg.conf",
 ) -> tuple[int | None, str | None]:
     """Run `ora2pg -t <action>` (COPY or INSERT), stream stdout/stderr and parse progress into
     the live snapshot. Returns (exit_code, error). `error` is set only when the stream raised.
@@ -268,7 +302,7 @@ def _copy_stream(
     try:
         exec_id = api.exec_create(
             container_id,
-            cmd=["stdbuf", "-oL", "-eL", "ora2pg", "-c", "/config/ora2pg.conf", "-t", action],
+            cmd=["stdbuf", "-oL", "-eL", "ora2pg", "-c", conf_path, "-t", action],
             stdout=True, stderr=True,
         )["Id"]
         stream = api.exec_start(exec_id, stream=True)
@@ -358,15 +392,13 @@ def _worker(run_id: str, table: Ora2pgTable, test_rows: int, pk_columns: list[st
         fail(f"docker SDK unavailable: {exc}")
         return
 
-    # 1) Generate ora2pg.conf into the shared volume (== /config in the ora2pg container)
+    # 1) Generate this run's OWN ora2pg.conf into an isolated /config/run_<id>/ dir (no cross-run race)
     try:
         conf = build_ora2pg_conf(table, test_rows=test_rows)
-        os.makedirs(settings.ora2pg_shared_dir, exist_ok=True)
-        conf_path = os.path.join(settings.ora2pg_shared_dir, "ora2pg.conf")
-        with open(conf_path, "w", encoding="utf-8") as fh:
-            fh.write(conf)
+        backend_dir, container_dir = _write_conf(conf, run_id)
+        conf_arg = f"{container_dir}/ora2pg.conf"
         # Log the config with secrets redacted (proves the conf is generated from env)
-        log_tail.append("Generated /config/ora2pg.conf:\n" + redact_conf(conf))
+        log_tail.append(f"Generated {conf_arg}:\n" + redact_conf(conf))
         _set(run_id, phase="config", message="Generated ora2pg.conf (secrets redacted in log)")
     except Exception as exc:
         fail(f"Failed to generate ora2pg.conf: {exc}")
@@ -384,14 +416,14 @@ def _worker(run_id: str, table: Ora2pgTable, test_rows: int, pk_columns: list[st
     _set(run_id, phase="ddl", message="Extracting schema from Oracle (ora2pg -t TABLE)…")
     code, out = _exec_collect(
         api, container.id,
-        ["ora2pg", "-c", "/config/ora2pg.conf", "-t", "TABLE", "-b", "/config", "-o", "auto_schema.sql"],
+        ["ora2pg", "-c", conf_arg, "-t", "TABLE", "-b", container_dir, "-o", "auto_schema.sql"],
     )
     log_tail.append(out)
     if code != 0:
         fail(f"ora2pg TABLE (DDL) failed (exit {code}). Oracle reachable only on .63.\n{out}")
         return
     try:
-        ddl_path = os.path.join(settings.ora2pg_shared_dir, "auto_schema.sql")
+        ddl_path = os.path.join(backend_dir, "auto_schema.sql")
         ddl_sql = ""
         if os.path.exists(ddl_path):
             with open(ddl_path, encoding="utf-8") as fh:
@@ -412,7 +444,7 @@ def _worker(run_id: str, table: Ora2pgTable, test_rows: int, pk_columns: list[st
 
     # 3) COPY pass — stream rows and parse progress
     _set(run_id, phase="copy", message="Copying data (ora2pg -t COPY)…")
-    exit_code, err = _copy_stream(api, container.id, run_id, started, log_tail, total_hint=total_hint)
+    exit_code, err = _copy_stream(api, container.id, run_id, started, log_tail, total_hint=total_hint, conf_path=conf_arg)
     if err:
         fail(err)
         return
@@ -473,8 +505,9 @@ def _repair_worker(run_id: str, table: Ora2pgTable, watermark_col: str, cutoff: 
     where = f"{table.table}[{watermark_col.upper()} >= {cutoff}]"
     try:
         conf = build_ora2pg_conf(table, truncate=False, where_clause=where)
-        _write_conf(conf)
-        log_tail.append("Generated /config/ora2pg.conf (repair):\n" + redact_conf(conf))
+        _backend_dir, container_dir = _write_conf(conf, run_id)
+        conf_arg = f"{container_dir}/ora2pg.conf"
+        log_tail.append(f"Generated {conf_arg} (repair):\n" + redact_conf(conf))
         _set(run_id, phase="config", message="Generated repair ora2pg.conf (append + WHERE)")
     except Exception as exc:
         fail(f"Failed to generate repair ora2pg.conf: {exc}")
@@ -509,7 +542,7 @@ def _repair_worker(run_id: str, table: Ora2pgTable, watermark_col: str, cutoff: 
         return
 
     _set(run_id, phase="copy", message=f"Re-pulling {watermark_col} ≥ {cutoff} (append)…")
-    exit_code, err = _copy_stream(api, container.id, run_id, started, log_tail)
+    exit_code, err = _copy_stream(api, container.id, run_id, started, log_tail, conf_path=conf_arg)
     if err:
         fail(err)
         return
@@ -562,8 +595,9 @@ def _repair_pk_worker(run_id: str, table: Ora2pgTable, pk_columns: list[str]) ->
 
     try:
         conf = build_ora2pg_conf(table, truncate=False, insert_on_conflict=True)
-        _write_conf(conf)
-        log_tail.append("Generated /config/ora2pg.conf (PK repair):\n" + redact_conf(conf))
+        _backend_dir, container_dir = _write_conf(conf, run_id)
+        conf_arg = f"{container_dir}/ora2pg.conf"
+        log_tail.append(f"Generated {conf_arg} (PK repair):\n" + redact_conf(conf))
         _set(run_id, phase="config", message="Generated PK-repair ora2pg.conf (INSERT ON CONFLICT)")
     except Exception as exc:
         fail(f"Failed to generate PK-repair ora2pg.conf: {exc}")
@@ -584,7 +618,7 @@ def _repair_pk_worker(run_id: str, table: Ora2pgTable, pk_columns: list[str]) ->
         return
 
     _set(run_id, phase="copy", message="Re-pulling source (INSERT … ON CONFLICT DO NOTHING)…")
-    exit_code, err = _copy_stream(api, container.id, run_id, started, log_tail, action="INSERT")
+    exit_code, err = _copy_stream(api, container.id, run_id, started, log_tail, action="INSERT", conf_path=conf_arg)
     if err:
         fail(err)
         return
@@ -616,7 +650,9 @@ def start_run(
     """Launch the ora2pg worker in a daemon thread (non-blocking)."""
     _set(run_id, run_id=run_id, table=table.table, status="pending", phase="queued",
          rows_done=0, rows_total=None, pct=0.0, message="Queued")
-    thread = threading.Thread(target=_worker, args=(run_id, table, test_rows, pk_columns), daemon=True)
+    thread = threading.Thread(
+        target=_worker_then_cleanup, args=(_worker, run_id, table, test_rows, pk_columns), daemon=True
+    )
     thread.start()
 
 
@@ -635,11 +671,11 @@ def start_repair(
          rows_done=0, rows_total=None, pct=0.0, message="Queued (repair)")
     if mode == "pk" and pk_columns:
         thread = threading.Thread(
-            target=_repair_pk_worker, args=(run_id, table, pk_columns), daemon=True
+            target=_worker_then_cleanup, args=(_repair_pk_worker, run_id, table, pk_columns), daemon=True
         )
     else:
         thread = threading.Thread(
-            target=_repair_worker, args=(run_id, table, watermark_col, cutoff), daemon=True
+            target=_worker_then_cleanup, args=(_repair_worker, run_id, table, watermark_col, cutoff), daemon=True
         )
     thread.start()
 
@@ -732,8 +768,9 @@ def streaming_pull_once(
         conf = build_ora2pg_conf(
             table, truncate=False, where_clause=where_clause, insert_on_conflict=True
         )
-        _write_conf(conf)
-        log_tail.append("Generated /config/ora2pg.conf (streaming):\n" + redact_conf(conf))
+        _backend_dir, container_dir = _write_conf(conf, run_id)
+        conf_arg = f"{container_dir}/ora2pg.conf"
+        log_tail.append(f"Generated {conf_arg} (streaming):\n" + redact_conf(conf))
 
         try:
             api, container = _open_ora2pg()
@@ -748,7 +785,7 @@ def streaming_pull_once(
 
         rows_before = _count_target(table.target_table)
         started = time.monotonic()
-        exit_code, err = _copy_stream(api, container.id, run_id, started, log_tail, action="INSERT")
+        exit_code, err = _copy_stream(api, container.id, run_id, started, log_tail, action="INSERT", conf_path=conf_arg)
         rows_after = _count_target(table.target_table)
 
         result.update(
@@ -770,6 +807,7 @@ def streaming_pull_once(
         return result
     finally:
         _drop_progress(run_id)
+        _cleanup_run_conf(run_id)  # never leave a streaming cycle's conf behind (runs every few min)
 
 
 def _map_pk_to_view(index_cols: dict[str, list[tuple[int, str]]], view_cols: set[str]) -> tuple[list[str] | None, list[str]]:
