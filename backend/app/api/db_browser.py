@@ -70,7 +70,7 @@ def preview_table_endpoint(
     schema_name: str,
     table_name: str,
     db: Annotated[Session, Depends(get_db)],
-    limit: Annotated[int, Query(ge=1)] = 50,
+    limit: Annotated[int, Query(ge=1, le=10000)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> dict:
     try:

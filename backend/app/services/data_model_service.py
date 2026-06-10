@@ -169,3 +169,12 @@ def deactivate_data_model(db: Session, data_model: DataModel) -> DataModel:
     db.commit()
     db.refresh(data_model)
     return data_model
+
+
+def delete_data_model_record(db: Session, data_model: DataModel) -> None:
+    """Hard-delete ONLY the data-model metadata record (admin Delete action). DATA-SAFETY: this
+    deliberately does NOT drop the generated ``mdp_data.dm_*`` table — the physical data survives
+    and is reused if a model of the same name is re-created. Orphan-table cleanup is a later
+    milestone."""
+    db.delete(data_model)
+    db.commit()

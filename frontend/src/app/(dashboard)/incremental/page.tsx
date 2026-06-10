@@ -22,6 +22,16 @@ function fmt(v: unknown): string {
   return String(v);
 }
 
+// "All" is capped (a 58M-row table would crash the browser/backend) — it pages this many at a time.
+const PREVIEW_ALL_CAP = 10000;
+const ROW_OPTIONS: { label: string; value: number }[] = [
+  { label: "50", value: 50 },
+  { label: "100", value: 100 },
+  { label: "500", value: 500 },
+  { label: "1000", value: 1000 },
+  { label: "All (cap 10k)", value: PREVIEW_ALL_CAP },
+];
+
 export default function DbBrowserPage() {
   const [schemas, setSchemas] = useState<string[]>([]);
   const [schema, setSchema] = useState<string>("");
@@ -31,6 +41,8 @@ export default function DbBrowserPage() {
   const [err, setErr] = useState<string | null>(null);
   const [loadingTables, setLoadingTables] = useState(false);
   const [loadingPreview, setLoadingPreview] = useState(false);
+  const [rowLimit, setRowLimit] = useState(50);
+  const [offset, setOffset] = useState(0);
 
   useEffect(() => {
     listSchemas()
@@ -53,18 +65,35 @@ export default function DbBrowserPage() {
       .finally(() => setLoadingTables(false));
   }, [schema]);
 
-  async function openPreview(t: string) {
+  async function loadPreview(t: string, limit: number, off: number) {
     setSelectedTable(t);
-    setPreview(null);
     setLoadingPreview(true);
     setErr(null);
     try {
-      setPreview(await previewTable(schema, t, 50));
+      setPreview(await previewTable(schema, t, limit, off));
     } catch (e) {
       setErr(e instanceof ApiError ? e.message : String(e));
     } finally {
       setLoadingPreview(false);
     }
+  }
+
+  function openPreview(t: string) {
+    setOffset(0);
+    setPreview(null);
+    void loadPreview(t, rowLimit, 0);
+  }
+
+  function changeLimit(next: number) {
+    setRowLimit(next);
+    setOffset(0);
+    if (selectedTable) void loadPreview(selectedTable, next, 0);
+  }
+
+  function gotoOffset(next: number) {
+    const off = Math.max(0, next);
+    setOffset(off);
+    if (selectedTable) void loadPreview(selectedTable, rowLimit, off);
   }
 
   return (
@@ -108,11 +137,39 @@ export default function DbBrowserPage() {
         <Card>
           <CardHeader
             title={selectedTable ? `${schema}.${selectedTable}` : "Preview"}
-            subtitle={preview ? `${preview.count} rows (limit ${preview.limit})` : undefined}
+            subtitle={
+              preview
+                ? `rows ${preview.offset + 1}–${preview.offset + preview.count}` +
+                  (preview.total_estimate != null ? ` of ~${preview.total_estimate.toLocaleString()}` : "") +
+                  ` · page size ${preview.limit}`
+                : undefined
+            }
+            action={
+              selectedTable ? (
+                <Select
+                  label="Rows"
+                  value={String(rowLimit)}
+                  onChange={(e) => changeLimit(Number(e.target.value))}
+                >
+                  {ROW_OPTIONS.map((o) => (
+                    <option key={o.value} value={o.value}>
+                      {o.label}
+                    </option>
+                  ))}
+                </Select>
+              ) : undefined
+            }
           />
           <CardBody>
             {!selectedTable && <p className="text-sm text-neutral-400">Pick a table to preview rows.</p>}
             {loadingPreview && <p className="text-sm text-neutral-400">Loading preview...</p>}
+            {preview &&
+              rowLimit === PREVIEW_ALL_CAP &&
+              (preview.has_more || (preview.total_estimate ?? 0) > PREVIEW_ALL_CAP) && (
+                <p className="mb-2 rounded-md bg-warning/10 px-3 py-2 text-xs text-warning">
+                  Showing the first {PREVIEW_ALL_CAP.toLocaleString()} rows — table is larger; use Next/Prev to page through the rest.
+                </p>
+              )}
             {preview && preview.rows.length === 0 && (
               <p className="text-sm text-neutral-400">(no rows)</p>
             )}
@@ -138,6 +195,25 @@ export default function DbBrowserPage() {
                     ))}
                   </TBody>
                 </Table>
+              </div>
+            )}
+            {preview && (preview.offset > 0 || preview.has_more) && (
+              <div className="mt-3 flex items-center justify-between text-sm">
+                <button
+                  className="rounded-md border border-neutral-200 px-3 py-1 disabled:opacity-40"
+                  disabled={offset === 0 || loadingPreview}
+                  onClick={() => gotoOffset(offset - rowLimit)}
+                >
+                  ← Prev
+                </button>
+                <span className="text-neutral-500">offset {preview.offset}</span>
+                <button
+                  className="rounded-md border border-neutral-200 px-3 py-1 disabled:opacity-40"
+                  disabled={!preview.has_more || loadingPreview}
+                  onClick={() => gotoOffset(offset + rowLimit)}
+                >
+                  Next →
+                </button>
               </div>
             )}
           </CardBody>

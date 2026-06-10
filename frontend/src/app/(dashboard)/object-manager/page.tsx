@@ -1,7 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ClipboardList, Eye, Pencil, Power, RotateCcw, TableProperties } from "lucide-react";
+import { ClipboardList, Eye, Pencil, Power, RotateCcw, TableProperties, Trash2 } from "lucide-react";
+import { useAuth } from "@/components/auth/AuthProvider";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Card, CardBody, CardHeader } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
@@ -17,6 +18,7 @@ import {
   createDataModelFromTemplate,
   createDataModel,
   deleteDataModel,
+  purgeDataModel,
   getDataModel,
   listDataModelTemplates,
   listColumns,
@@ -346,6 +348,8 @@ export default function DataModelsPage() {
   const [preview, setPreview] = useState<ModelPreview | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [confirm, setConfirm] = useState<DataModel | null>(null);
+  const { user } = useAuth();
+  const isAdmin = user?.role === "admin";
   const [templateOpen, setTemplateOpen] = useState(false);
   const [templates, setTemplates] = useState<DataModelTemplate[]>([]);
   const [selectedTemplateKey, setSelectedTemplateKey] = useState("");
@@ -827,6 +831,28 @@ export default function DataModelsPage() {
     }
   }
 
+  // Admin-only HARD delete of the model record. The generated mdp_data.dm_* table + data are KEPT.
+  async function purgeModel(model: DataModel) {
+    if (
+      !window.confirm(
+        `Delete model “${model.name}” permanently?\n\nThe generated table mdp_data.dm_${model.name} ` +
+          `and ALL its data are KEPT (not dropped). Re-creating a model with this name reuses the table.`,
+      )
+    )
+      return;
+    setSaving(true);
+    setPageError(null);
+    try {
+      await purgeDataModel(model.id);
+      setNotice(`Deleted model ${model.name} (generated table + data kept).`);
+      await reload();
+    } catch (error) {
+      setPageError(error instanceof ApiError ? error.message : String(error));
+    } finally {
+      setSaving(false);
+    }
+  }
+
   const modalTitle =
     mode === "create"
       ? "Create Data Model"
@@ -947,6 +973,15 @@ export default function DataModelsPage() {
                         >
                           {model.status === "active" ? <Power size={15} /> : <RotateCcw size={15} />}
                         </ActionIcon>
+                        {isAdmin && (
+                          <ActionIcon
+                            title={`Delete ${model.name} (keeps generated table + data)`}
+                            onClick={() => purgeModel(model)}
+                            danger
+                          >
+                            <Trash2 size={15} />
+                          </ActionIcon>
+                        )}
                       </div>
                     </TD>
                     <TD className="truncate font-medium" title={model.display_name || model.name}>

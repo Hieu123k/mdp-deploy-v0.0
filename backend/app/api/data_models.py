@@ -5,13 +5,15 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, require_admin
 from app.db.session import get_db
 from app.models.data_model import DataModel
+from app.models.user import User
 from app.schemas.data_model import DataModelCreate, DataModelRead, DataModelUpdate
 from app.services.data_model_service import (
     create_data_model,
     deactivate_data_model,
+    delete_data_model_record,
     get_data_model,
     get_data_model_by_name,
     list_data_models,
@@ -197,3 +199,17 @@ def deactivate_data_model_endpoint(
             detail="Data model not found",
         )
     return deactivate_data_model(db, data_model)
+
+
+@router.delete("/{data_model_id}/record", status_code=status.HTTP_204_NO_CONTENT)
+def delete_data_model_endpoint(
+    data_model_id: uuid.UUID,
+    db: Annotated[Session, Depends(get_db)],
+    _admin: Annotated[User, Depends(require_admin)],
+) -> None:
+    """Admin-only HARD delete of the model RECORD. DATA-SAFETY: the generated mdp_data.dm_* table
+    is intentionally NOT dropped — physical data survives (reused if the model is re-created)."""
+    data_model = get_data_model(db, data_model_id)
+    if data_model is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Data model not found")
+    delete_data_model_record(db, data_model)

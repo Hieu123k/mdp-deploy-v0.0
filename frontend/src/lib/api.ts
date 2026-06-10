@@ -272,6 +272,9 @@ export const updateDataModel = (id: string, body: Partial<DataModelCreate>) =>
 /** Soft-deactivate (status=inactive); returns the model. */
 export const deleteDataModel = (id: string) =>
   req<DataModel>(`/data-models/${id}`, { method: "DELETE" });
+/** Admin-only HARD delete of the model record. Does NOT drop the generated mdp_data.dm_* table. */
+export const purgeDataModel = (id: string) =>
+  req<void>(`/data-models/${id}/record`, { method: "DELETE" });
 export const listDataModelTemplates = () =>
   req<DataModelTemplate[]>("/data-model-templates");
 export const getDataModelTemplate = (templateKey: string) =>
@@ -337,6 +340,9 @@ export type DbPreview = {
   limit: number;
   offset: number;
   count: number;
+  has_more?: boolean;
+  total_estimate?: number | null;
+  max_limit?: number;
   columns: string[];
   rows: Record<string, unknown>[];
 };
@@ -351,9 +357,9 @@ export const listColumns = (schema: string, table: string) =>
   req<{ columns: DbColumn[] }>(
     `/db-browser/schemas/${encodeURIComponent(schema)}/tables/${encodeURIComponent(table)}/columns`,
   ).then((r) => r.columns);
-export const previewTable = (schema: string, table: string, limit = 50) =>
+export const previewTable = (schema: string, table: string, limit = 50, offset = 0) =>
   req<DbPreview>(
-    `/db-browser/schemas/${encodeURIComponent(schema)}/tables/${encodeURIComponent(table)}/preview?limit=${limit}`,
+    `/db-browser/schemas/${encodeURIComponent(schema)}/tables/${encodeURIComponent(table)}/preview?limit=${limit}&offset=${offset}`,
   );
 
 /** Map a raw Postgres data_type -> one of the 7 platform types (mirrors backend). */

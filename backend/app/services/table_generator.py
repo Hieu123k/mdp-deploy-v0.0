@@ -99,7 +99,11 @@ def create_generated_table_for_model(db: Session, model: Any) -> str:
         column_type = map_data_type_to_postgres(attribute["data_type"])
         columns.append(f"{column_name} {column_type}")
 
-    db.execute(text(f"CREATE TABLE {quoted_table_name} ({', '.join(columns)})"))
+    # IF NOT EXISTS: a model can be hard-deleted while its generated table is intentionally KEPT
+    # (data-safety). Re-creating a model with the same name must REUSE that table — never drop it —
+    # so existing data survives; sync_generated_table_columns then adds any new attribute columns.
+    db.execute(text(f"CREATE TABLE IF NOT EXISTS {quoted_table_name} ({', '.join(columns)})"))
+    sync_generated_table_columns(db, model)
     return table_name
 
 

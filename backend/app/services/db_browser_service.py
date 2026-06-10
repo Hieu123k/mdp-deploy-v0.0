@@ -207,6 +207,26 @@ def serialize_value(value: Any) -> Any:
     return value
 
 
+# Hard ceiling for a single page (incl. the "All" selector) — NEVER SELECT a whole multi-million
+# -row table at once (e.g. F4111 ~58M would OOM the browser/backend). "All" caps here + paginates.
+PREVIEW_MAX_LIMIT = 10_000
+
+
+def _estimate_row_total(db: Session, schema_name: str, table_name: str, dialect_name: str) -> int | None:
+    """O(1) planner-stat estimate of total rows (Postgres reltuples) so a pager has a denominator
+    WITHOUT a full count(*) on a huge table. None on SQLite / when unknown."""
+    if dialect_name != "postgresql":
+        return None
+    try:
+        val = db.execute(
+            text("SELECT reltuples::bigint FROM pg_class WHERE oid = to_regclass(:rel)"),
+            {"rel": f"{schema_name}.{table_name}"},
+        ).scalar()
+        return int(val) if val is not None and val >= 0 else None
+    except Exception:
+        return None
+
+
 def preview_table(
     db: Session,
     schema_name: str,
@@ -216,25 +236,31 @@ def preview_table(
     offset: int = 0,
 ) -> dict[str, Any]:
     ensure_table_exists(db, schema_name, table_name)
-    limit = min(max(limit, 1), 100)
+    limit = min(max(limit, 1), PREVIEW_MAX_LIMIT)  # raised cap (was 100) so 500/1000/All work, but bounded
     offset = max(offset, 0)
     columns = [column["column_name"] for column in list_columns(db, schema_name, table_name)]
     dialect_name = _dialect_name(db)
     table_ref = _qualified_table(schema_name, table_name, dialect_name)
+    # Pull limit+1 to know if there's a next page without counting the whole table.
     rows = db.execute(
         text(f"SELECT * FROM {table_ref} LIMIT :limit OFFSET :offset"),
-        {"limit": limit, "offset": offset},
+        {"limit": limit + 1, "offset": offset},
     ).mappings()
     data = [
         {key: serialize_value(value) for key, value in row.items()}
         for row in rows
     ]
+    has_more = len(data) > limit
+    data = data[:limit]
     return {
         "schema": schema_name,
         "table": table_name,
         "limit": limit,
         "offset": offset,
         "count": len(data),
+        "has_more": has_more,
+        "total_estimate": _estimate_row_total(db, schema_name, table_name, dialect_name),
+        "max_limit": PREVIEW_MAX_LIMIT,
         "columns": columns,
         "rows": data,
     }
