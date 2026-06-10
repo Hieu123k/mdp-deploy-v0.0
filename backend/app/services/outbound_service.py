@@ -19,7 +19,12 @@ from app.services.table_generator import (
 )
 from app.services.transaction_logger import log_transaction
 from app.schemas.data_model import DataModelCreate
-from app.services.type_b_mapping_service import TypeBMappingError, validate_type_b_mapping
+from app.services.type_b_mapping_service import (
+    TypeBMappingError,
+    build_type_b_from_clause,
+    type_b_qualified_column,
+    validate_type_b_mapping,
+)
 from app.services.db_browser_service import serialize_value
 
 
@@ -231,38 +236,39 @@ def query_type_b_records(
             ]
         )
 
-    source_schema = validation["source_schema"]
-    source_table = validation["source_table"]
-    table_ref = quote_table_reference(db, source_schema, source_table)
+    # Shared FROM/JOIN builder (single- or multi-table) — same plan validate/preview used, so the
+    # outbound query and the preview are guaranteed identical. Every column is alias-qualified.
+    from_sql, alias_by_table = build_type_b_from_clause(db, validation)
     mapped_columns = validation["mapped_columns"]
+    column_ref_by_attribute = {
+        column["attribute"]: type_b_qualified_column(alias_by_table, column)
+        for column in mapped_columns
+    }
     select_clause = ", ".join(
-        f"{quote_identifier(column['source_column'])} AS {quote_identifier(column['attribute'])}"
+        f"{column_ref_by_attribute[column['attribute']]} AS {quote_identifier(column['attribute'])}"
         for column in mapped_columns
     )
-    source_column_by_attribute = {
-        column["attribute"]: column["source_column"] for column in mapped_columns
-    }
 
     where_clauses: list[str] = []
     params: dict[str, Any] = {"limit": limit, "offset": offset}
     is_postgres = bool(db.bind and db.bind.dialect.name == "postgresql")
     for index, (field, raw_value) in enumerate(filters.items()):
         attribute = attributes[field]
-        source_column = source_column_by_attribute[field]
+        column_ref = column_ref_by_attribute[field]
         param_name = f"filter_{index}"
         value = coerce_filter_value(attribute, raw_value)
-        where_clause = f"{quote_identifier(source_column)} = :{param_name}"
+        where_clause = f"{column_ref} = :{param_name}"
         params[param_name] = json.dumps(value) if attribute["data_type"] == "json" else value
         if attribute["data_type"] == "json" and is_postgres:
-            where_clause = f"{quote_identifier(source_column)} = CAST(:{param_name} AS JSONB)"
+            where_clause = f"{column_ref} = CAST(:{param_name} AS JSONB)"
         where_clauses.append(where_clause)
 
     where_sql = f" WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
     order_sql = ""
-    if model.primary_key and model.primary_key in source_column_by_attribute:
-        order_sql = f" ORDER BY {quote_identifier(source_column_by_attribute[model.primary_key])}"
+    if model.primary_key and model.primary_key in column_ref_by_attribute:
+        order_sql = f" ORDER BY {column_ref_by_attribute[model.primary_key]}"
     statement = text(
-        f"SELECT {select_clause} FROM {table_ref}{where_sql}{order_sql} "
+        f"SELECT {select_clause} FROM {from_sql}{where_sql}{order_sql} "
         "LIMIT :limit OFFSET :offset"
     )
     rows = db.execute(statement, params).mappings().all()
