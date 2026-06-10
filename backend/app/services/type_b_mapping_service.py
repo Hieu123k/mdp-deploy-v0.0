@@ -177,7 +177,13 @@ def _resolve_join_plan(
     identifier-safety on every schema/table/column; ``right.schema`` ∈ allowed; join columns same
     platform type; ``right.column`` UNIQUE (fan-out guard — N:1/1:1) unless ``allow_fanout``;
     connectivity from the base table (no orphan attribute tables)."""
-    rels = relationships or []
+    # The relationships column is SHARED: only JOIN-shaped entries (with left/right) are joins here.
+    # Other entries — e.g. {"type": "template_metadata", "config": ...} written by the template
+    # service — are ignored by the join planner (they carry documentation/config, not a SQL join).
+    rels = [
+        rel for rel in (relationships or [])
+        if isinstance(rel, dict) and (rel.get("left") is not None or rel.get("right") is not None)
+    ]
     if not rels:
         for s, t in sorted(attr_tables - {base}):
             errors.append({
