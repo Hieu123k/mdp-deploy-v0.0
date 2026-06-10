@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, require_permission
 from app.core.ora2pg_catalog import get_table
 from app.db.session import get_db
 from app.services import streaming_refresher, streaming_service
@@ -47,7 +47,7 @@ def get_config(table_name: str, db: Annotated[Session, Depends(get_db)]) -> dict
     return streaming_service.config_view(cfg, table)
 
 
-@router.put("/config/{table_name}")
+@router.put("/config/{table_name}", dependencies=[Depends(require_permission("streaming.configure"))])
 def put_config(
     table_name: str,
     payload: StreamingConfigUpdate,
@@ -101,7 +101,7 @@ def probe_columns(table_name: str, db: Annotated[Session, Depends(get_db)]) -> d
     return {"table": table.table, "columns": cols, "upmt_candidates": upmt, "error": err}
 
 
-@router.post("/run-once/{table_name}")
+@router.post("/run-once/{table_name}", dependencies=[Depends(require_permission("streaming.run_once"))])
 def run_once(
     table_name: str,
     db: Annotated[Session, Depends(get_db)],

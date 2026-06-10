@@ -19,6 +19,7 @@ from app.api.migration_templates import router as migration_templates_router
 from app.api.ora2pg_dashboard import router as ora2pg_dashboard_router
 from app.api.outbound import router as outbound_router
 from app.api.preferences import router as preferences_router
+from app.api.roles import router as roles_router
 from app.api.streaming import router as streaming_router
 from app.api.transactions import router as transactions_router
 from app.api.users import router as users_router
@@ -38,6 +39,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
             seed_reference_primary_keys(db)  # idempotent; never overrides a manual PK
         except Exception:  # pragma: no cover - never block startup on the PK seed
+            pass
+        try:
+            from app.services.permission_service import seed_role_permissions
+
+            seed_role_permissions(db)  # idempotent; never overrides an admin-edited grant
+        except Exception:  # pragma: no cover - never block startup on the RBAC seed
             pass
     refresher = SourceCountRefresher()
     try:
@@ -90,4 +97,5 @@ app.include_router(inbound_router)
 app.include_router(outbound_router)
 app.include_router(transactions_router)
 app.include_router(preferences_router)
+app.include_router(roles_router)
 app.include_router(streaming_router)

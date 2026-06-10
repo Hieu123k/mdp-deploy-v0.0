@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user, require_admin
+from app.api.deps import get_current_user, require_admin, require_permission
 from app.db.session import get_db
 from app.models.data_model import DataModel
 from app.models.user import User
@@ -51,7 +51,12 @@ def ensure_unique_name(
         )
 
 
-@router.post("", response_model=DataModelRead, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "",
+    response_model=DataModelRead,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_permission("data_model.create"))],
+)
 def create_data_model_endpoint(
     data_model_in: DataModelCreate,
     db: Annotated[Session, Depends(get_db)],
@@ -159,7 +164,11 @@ def get_data_model_mapped_preview_endpoint(
         ) from exc
 
 
-@router.put("/{data_model_id}", response_model=DataModelRead)
+@router.put(
+    "/{data_model_id}",
+    response_model=DataModelRead,
+    dependencies=[Depends(require_permission("data_model.edit"))],
+)
 def update_data_model_endpoint(
     data_model_id: uuid.UUID,
     data_model_in: DataModelUpdate,
@@ -187,7 +196,11 @@ def update_data_model_endpoint(
         ) from exc
 
 
-@router.delete("/{data_model_id}", response_model=DataModelRead)
+@router.delete(
+    "/{data_model_id}",
+    response_model=DataModelRead,
+    dependencies=[Depends(require_permission("data_model.delete"))],
+)
 def deactivate_data_model_endpoint(
     data_model_id: uuid.UUID,
     db: Annotated[Session, Depends(get_db)],

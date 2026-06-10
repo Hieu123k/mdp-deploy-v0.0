@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ArrowDown, ArrowUp, Palette, SlidersHorizontal, UserRound, Users as UsersIcon } from "lucide-react";
+import { ArrowDown, ArrowUp, Palette, ShieldCheck, SlidersHorizontal, UserRound, Users as UsersIcon } from "lucide-react";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Card, CardBody, CardHeader } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
@@ -22,9 +22,10 @@ import {
 import UsersPage from "@/app/(dashboard)/users/page";
 import ProfilePage from "@/app/(dashboard)/profile/page";
 import DesignSystemPage from "@/app/(dashboard)/design-system/page";
+import { RolePermissionsTab } from "@/components/settings/RolePermissionsTab";
 
 type TabRow = { href: string; label: string; baseLabel: string; visible: boolean };
-type Section = "access" | "users" | "profile" | "design";
+type Section = "access" | "users" | "role" | "profile" | "design";
 
 function buildRows(navConfig: NavConfig): TabRow[] {
   const rows = NAV_ITEMS.map((it) => {
@@ -56,7 +57,7 @@ export default function SettingsPage() {
     } catch {
       /* ignore */
     }
-    if (tab && ["access", "users", "profile", "design"].includes(tab)) {
+    if (tab && ["access", "users", "role", "profile", "design"].includes(tab)) {
       setSection(tab as Section);
     } else {
       setSection(isAdmin ? "access" : "profile");
@@ -131,6 +132,7 @@ export default function SettingsPage() {
   const TABS: { key: Section; label: string; icon: typeof UsersIcon; adminOnly?: boolean }[] = [
     { key: "access", label: "Tabs & access", icon: SlidersHorizontal, adminOnly: true },
     { key: "users", label: "Users", icon: UsersIcon, adminOnly: true },
+    { key: "role", label: "Role", icon: ShieldCheck, adminOnly: true },
     { key: "profile", label: "Profile", icon: UserRound },
     { key: "design", label: "Design System", icon: Palette },
   ];
@@ -249,6 +251,7 @@ export default function SettingsPage() {
       )}
 
       {section === "users" && isAdmin && <UsersPage />}
+      {section === "role" && isAdmin && <RolePermissionsTab />}
       {section === "profile" && <ProfilePage />}
       {section === "design" && <DesignSystemPage />}
     </div>

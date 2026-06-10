@@ -362,6 +362,16 @@ export const previewTable = (schema: string, table: string, limit = 50, offset =
     `/db-browser/schemas/${encodeURIComponent(schema)}/tables/${encodeURIComponent(table)}/preview?limit=${limit}&offset=${offset}`,
   );
 
+// ---- RBAC: role → permission matrix (admin-only) ----
+export type PermissionMatrix = {
+  permission_keys: string[];
+  admin_only: string[];
+  roles: Record<string, Record<string, boolean>>;
+};
+export const getRolePermissions = () => req<PermissionMatrix>("/roles/permissions");
+export const saveRolePermissions = (roles: Record<string, Record<string, boolean>>) =>
+  req<PermissionMatrix>("/roles/permissions", { method: "PUT", body: JSON.stringify({ roles }) });
+
 /** Map a raw Postgres data_type -> one of the 7 platform types (mirrors backend). */
 export function normalizePgType(raw: string): AttrType {
   const t = (raw || "").toLowerCase().split("(")[0].trim();

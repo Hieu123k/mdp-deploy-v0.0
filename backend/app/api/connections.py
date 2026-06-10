@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, require_permission
 from app.db.session import get_db
 from app.models.connection import Connection
 from app.models.user import User
@@ -50,7 +50,12 @@ def ensure_unique_name(
         )
 
 
-@router.post("", response_model=ConnectionRead, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "",
+    response_model=ConnectionRead,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_permission("connection.manage"))],
+)
 def create_connection_endpoint(
     connection_in: ConnectionCreate,
     db: Annotated[Session, Depends(get_db)],
@@ -82,7 +87,11 @@ def get_connection_endpoint(
     return connection
 
 
-@router.put("/{connection_id}", response_model=ConnectionRead)
+@router.put(
+    "/{connection_id}",
+    response_model=ConnectionRead,
+    dependencies=[Depends(require_permission("connection.manage"))],
+)
 def update_connection_endpoint(
     connection_id: uuid.UUID,
     connection_in: ConnectionUpdate,
@@ -101,7 +110,11 @@ def update_connection_endpoint(
         ) from exc
 
 
-@router.delete("/{connection_id}", response_model=ConnectionRead)
+@router.delete(
+    "/{connection_id}",
+    response_model=ConnectionRead,
+    dependencies=[Depends(require_permission("connection.manage"))],
+)
 def deactivate_connection_endpoint(
     connection_id: uuid.UUID,
     db: Annotated[Session, Depends(get_db)],

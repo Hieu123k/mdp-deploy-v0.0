@@ -21,7 +21,7 @@ from pydantic import BaseModel
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user, require_admin
+from app.api.deps import get_current_user, require_admin, require_permission
 from app.core.config import settings
 from app.core.ora2pg_catalog import (
     MIGRATABLE_TABLES,
@@ -300,7 +300,7 @@ def config_preview(table_name: str) -> dict[str, Any]:
 def start_migration(
     table_name: str,
     db: Annotated[Session, Depends(get_db)],
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(require_permission("migration.run"))],
     test_rows: int = 0,
 ) -> dict[str, Any]:
     table = get_table(table_name)
@@ -341,7 +341,7 @@ def start_migration(
 def verify_table(
     table_name: str,
     db: Annotated[Session, Depends(get_db)],
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(require_permission("migration.verify"))],
 ) -> dict[str, Any]:
     """On-demand reconciliation: an EXACT COUNT(*) on the Oracle source view (cached) plus an
     exact COUNT of the target, giving an official MATCH/MISMATCH. The exact Oracle count runs
@@ -360,7 +360,7 @@ class VerifyBatchRequest(BaseModel):
 @router.post("/verify-batch", status_code=status.HTTP_202_ACCEPTED)
 def verify_batch(
     payload: VerifyBatchRequest,
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(require_permission("migration.verify"))],
 ) -> dict[str, Any]:
     """Queue many tables for exact-verify. Every table (single or batched) runs through ONE global
     worker that processes them **sequentially** — never two exact COUNTs at once. No cap on how
@@ -392,7 +392,7 @@ def verify_batch_status(
 def repair_table(
     table_name: str,
     db: Annotated[Session, Depends(get_db)],
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(require_permission("migration.repair"))],
     mode: str | None = None,
     cutoff: str | None = None,
 ) -> dict[str, Any]:
@@ -792,7 +792,7 @@ def set_primary_key(
     table_name: str,
     payload: PrimaryKeyUpdate,
     db: Annotated[Session, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_admin)],
+    current_user: Annotated[User, Depends(require_permission("pk.edit"))],
 ) -> dict[str, Any]:
     """Admin-only: set a table's primary key (single or composite) → canonical
     ``migration_jobs.primary_key_columns`` (synced to streaming_config) and rebuild the target's

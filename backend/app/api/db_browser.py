@@ -3,7 +3,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, require_permission
 from app.db.session import get_db
 from app.services.db_browser_service import (
     DbBrowserNotFoundError,
@@ -18,7 +18,8 @@ from app.services.db_browser_service import (
 router = APIRouter(
     prefix="/db-browser",
     tags=["db-browser"],
-    dependencies=[Depends(get_current_user)],
+    # db_browser.view gates the whole browser (require_permission already implies authentication).
+    dependencies=[Depends(require_permission("db_browser.view"))],
 )
 
 

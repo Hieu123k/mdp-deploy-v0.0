@@ -79,6 +79,27 @@ def require_role(*roles: str) -> Callable[..., User]:
 require_admin = require_role("admin")
 
 
+def require_permission(permission_key: str) -> Callable[..., User]:
+    """Dependency factory → 403 unless the user's ROLE grants ``permission_key`` in role_permissions.
+    ``admin`` is always allowed (implicit-full). This is the capability layer (prompt 34); it composes
+    with — does not replace — ``require_role``/``require_admin`` on the core user/role routes."""
+
+    def _checker(
+        current_user: Annotated[User, Depends(get_current_user)],
+        db: Annotated[Session, Depends(get_db)],
+    ) -> User:
+        from app.services.permission_service import role_has_permission  # lazy: avoid import cycle
+
+        if not role_has_permission(db, current_user.role, permission_key):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Requires permission: {permission_key}",
+            )
+        return current_user
+
+    return _checker
+
+
 def get_request_auth_context(
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)],
     db: Annotated[Session, Depends(get_db)],

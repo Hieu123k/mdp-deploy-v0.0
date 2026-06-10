@@ -4,7 +4,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, require_permission
 from app.db.session import get_db
 from app.models.api_key import ApiKey
 from app.models.user import User
@@ -25,7 +25,12 @@ router = APIRouter(
 )
 
 
-@router.post("", response_model=ApiKeyCreateResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "",
+    response_model=ApiKeyCreateResponse,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_permission("api_key.create"))],
+)
 def create_api_key_endpoint(
     api_key_in: ApiKeyCreate,
     db: Annotated[Session, Depends(get_db)],
@@ -65,7 +70,11 @@ def update_api_key_endpoint(
     return update_api_key(db, api_key, api_key_in)
 
 
-@router.delete("/{api_key_id}", response_model=ApiKeyRead)
+@router.delete(
+    "/{api_key_id}",
+    response_model=ApiKeyRead,
+    dependencies=[Depends(require_permission("api_key.delete"))],
+)
 def deactivate_api_key_endpoint(
     api_key_id: uuid.UUID,
     db: Annotated[Session, Depends(get_db)],
