@@ -49,6 +49,14 @@ def _acquire_singleton() -> Any | None:
         return None
 
 
+def _run_all_due_blocking() -> dict[str, Any]:
+    """Synchronous cycle (opens its own session). Run via run_in_executor so a long ora2pg pull /
+    full-reload (F4111 ~58M can take 1h+) executes on a worker THREAD and never blocks the asyncio
+    event loop — /health and every other request stay responsive (the deferred report-27 #5 fix)."""
+    with SessionLocal() as db:
+        return streaming_service.run_all_due(db)
+
+
 async def _loop(stop_event: asyncio.Event) -> None:
     _status.update(running=True)
     # Idle tick (no enabled table): how often to re-check if a table got enabled.
@@ -60,8 +68,8 @@ async def _loop(stop_event: asyncio.Event) -> None:
             # Otherwise the per-table `enabled` flag (run_all_due) is the sole control.
             _status.update(enabled=bool(settings.streaming_enabled))
             if settings.streaming_enabled:
-                with SessionLocal() as db:
-                    result = streaming_service.run_all_due(db)
+                # Offload the blocking cycle to a thread (executor) — never run ora2pg in the loop.
+                result = await asyncio.get_running_loop().run_in_executor(None, _run_all_due_blocking)
                 _status.update(last_result=result)
                 if result.get("ran"):
                     logger.info("streaming poll cycle: %s", result)

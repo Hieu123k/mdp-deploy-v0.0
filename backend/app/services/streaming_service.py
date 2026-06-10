@@ -66,9 +66,12 @@ def build_streaming_predicate(
     cursor_day: str | None = None,
     cursor_time: str | None = None,
     lookback_days: int = 1,
+    sequence: bool = False,
 ) -> str:
     """Build the ora2pg WHERE predicate for one streaming cycle: ``VIEW[<sql>]``.
 
+    - ``sequence`` (monotonic id, e.g. ILUKID): ``ts_col > cursor`` — STRICT, NO lookback. An id is
+      assign-once and never updated, so a re-pull would only duplicate; the cursor is ``MAX(id)``.
     - ``day``: ``ts_col >= (cursor_day - lookback_days)``. The ``>=`` + lookback re-pulls a small
       trailing window so same-day updates are not missed; ON CONFLICT then dedups. (JDE Julian
       ``CYYDDD`` arithmetic: plain integer subtraction; a year-boundary cutoff merely over-pulls a
@@ -78,6 +81,9 @@ def build_streaming_predicate(
     """
     view_u = view.upper()
     col = ts_col.upper()
+    if sequence:
+        c = _as_int(cursor_day, 0)
+        return f"{view_u}[{col} > {c}]"
     gran = effective_granularity(granularity, ts_time_col)
     if gran == "timestamp":
         tcol = (ts_time_col or "").upper()
@@ -117,7 +123,7 @@ def upsert_config(db: Session, source_view: str, **fields: Any) -> StreamingConf
         cfg = StreamingConfig(
             source_view=source_view.upper(),
             target_table=table.target_table if table else source_view.lower(),
-            ts_col=_default_ts_col(table) if table else None,
+            ts_col=None,  # admin picks the watermark column explicitly (or "(none)" → full-reload)
         )
         db.add(cfg)
     for key, value in fields.items():
@@ -130,8 +136,11 @@ def upsert_config(db: Session, source_view: str, **fields: Any) -> StreamingConf
 
 def config_view(cfg: StreamingConfig | None, table: Ora2pgTable) -> dict[str, Any]:
     """Serialise a config (saved row or catalog default) for the API."""
-    ts_col = (cfg.ts_col if cfg and cfg.ts_col else _default_ts_col(table))
+    # Authoritative: a saved row's ts_col IS the choice (None/"" → full-reload). The catalog hint is
+    # only a suggestion when no row exists yet.
+    ts_col = ((cfg.ts_col or "").strip() or None) if cfg else _default_ts_col(table)
     gran = effective_granularity(cfg.granularity if cfg else "day", cfg.ts_time_col if cfg else None)
+    full = not ts_col
     return {
         "source_view": table.table,
         "target_table": table.target_table,
@@ -139,10 +148,14 @@ def config_view(cfg: StreamingConfig | None, table: Ora2pgTable) -> dict[str, An
         "enabled": bool(cfg.enabled) if cfg else False,
         "ts_col": ts_col,
         "ts_time_col": cfg.ts_time_col if cfg else None,
+        "ts_kind": (cfg.ts_kind if cfg else "date"),
         "granularity": gran,
         "poll_interval_sec": cfg.poll_interval_sec if cfg else 300,
         "lookback_days": cfg.lookback_days if cfg else 1,
         "primary_key_columns": (cfg.primary_key_columns if cfg else None),
+        # 2-case mode (prompt 35): incremental (watermark) vs full-reload (atomic swap, ≥12h).
+        "mode": "full" if full else "incremental",
+        "min_interval_sec": FULL_RELOAD_MIN_INTERVAL if full else MIN_INTERVAL,
         "last_watermark": cfg.last_watermark if cfg else None,
         "last_watermark_time": cfg.last_watermark_time if cfg else None,
         "last_run_at": cfg.last_run_at.isoformat() if cfg and cfg.last_run_at else None,
@@ -213,11 +226,8 @@ def run_cycle(db: Session, cfg: StreamingConfig, *, force: bool = False) -> dict
     if not cfg.enabled and not force:
         return {"ok": False, "table": table.table, "skipped": True, "error": "disabled"}
 
-    ts_col = cfg.ts_col or _default_ts_col(table)
-    if not ts_col:
-        return _finish(db, cfg, table, ok=False, status="error", error="no ts_col configured")
-
-    gran = effective_granularity(cfg.granularity, cfg.ts_time_col)
+    # Authoritative: the saved ts_col IS the choice (None/"" → Case B full-reload). No hint fallback.
+    ts_col = (cfg.ts_col or "").strip() or None
 
     # Canonical PK = migration_jobs.primary_key_columns (set by discover-keys or the dashboard PK
     # editor). Prefer it so a PK change on the Migration dashboard takes effect for streaming too;
@@ -225,41 +235,48 @@ def run_cycle(db: Session, cfg: StreamingConfig, *, force: bool = False) -> dict
     pk = _job_pk(db, table) or cfg.primary_key_columns or _discover_pk(table)
     if pk and cfg.primary_key_columns != pk:
         cfg.primary_key_columns = pk
+
+    # ---- Case B: no watermark column (or PK cleared) → FULL-RELOAD + atomic swap ----
+    if not ts_col:
+        res = ora2pg_runner.full_reload_once(table, pk_columns=pk)
+        return _finish(
+            db, cfg, table, ok=bool(res.get("ok")),
+            status=("ok" if res.get("ok") else "error"), error=res.get("error"),
+            rows_added=res.get("rows_added"), predicate="(full reload — atomic swap)", extra=res,
+        )
+
+    # ---- Case A: incremental (date OR sequence) — needs a PK for ON CONFLICT upsert ----
     if not pk:
         return _finish(db, cfg, table, ok=False, status="error",
-                       error="no primary_key_columns (run Scan PK / set it on the dashboard — ON CONFLICT needs a unique key)")
-
+                       error="no primary_key_columns (run Scan PK / set it on the dashboard — ON CONFLICT needs a unique key). Clear PK to fall back to full-reload.")
     if not ora2pg_runner.target_exists(table.target_table):
         return _finish(db, cfg, table, ok=False, status="error",
                        error="target table missing — run an initial full load before streaming")
 
+    sequence = (cfg.ts_kind or "date") == "sequence"
+    gran = effective_granularity(cfg.granularity, cfg.ts_time_col)
+    time_col = cfg.ts_time_col if (gran == "timestamp" and not sequence) else None
+
     # Initialise the cursor from the loaded baseline (only rows newer than what's loaded stream in).
     if cfg.last_watermark is None:
-        d0, t0 = ora2pg_runner.target_max_watermark(
-            table.target_table, ts_col, cfg.ts_time_col if gran == "timestamp" else None
-        )
+        d0, t0 = ora2pg_runner.target_max_watermark(table.target_table, ts_col, time_col)
         cfg.last_watermark = d0 if d0 is not None else "0"
-        cfg.last_watermark_time = t0
+        cfg.last_watermark_time = t0 if not sequence else None
 
     predicate = build_streaming_predicate(
-        table.table,
-        ts_col,
-        ts_time_col=cfg.ts_time_col,
-        granularity=gran,
-        cursor_day=cfg.last_watermark,
-        cursor_time=cfg.last_watermark_time,
-        lookback_days=cfg.lookback_days,
+        table.table, ts_col,
+        ts_time_col=cfg.ts_time_col, granularity=gran,
+        cursor_day=cfg.last_watermark, cursor_time=cfg.last_watermark_time,
+        lookback_days=cfg.lookback_days, sequence=sequence,
     )
 
     res = ora2pg_runner.streaming_pull_once(table, where_clause=predicate, pk_columns=pk)
 
     if res.get("ok"):
-        d2, t2 = ora2pg_runner.target_max_watermark(
-            table.target_table, ts_col, cfg.ts_time_col if gran == "timestamp" else None
-        )
+        d2, t2 = ora2pg_runner.target_max_watermark(table.target_table, ts_col, time_col)
         if d2 is not None:
             cfg.last_watermark = d2
-            if gran == "timestamp":
+            if gran == "timestamp" and not sequence:
                 cfg.last_watermark_time = t2
         return _finish(db, cfg, table, ok=True, status="ok", error=None,
                        rows_added=res.get("rows_added"), predicate=predicate, extra=res)
@@ -305,20 +322,39 @@ def _finish(
     return payload
 
 
-# Absolute floor (seconds) for the per-table interval — the Settings "Interval (s)" field is the
+# Absolute floor (seconds) for an incremental table — the Settings "Interval (s)" field is the
 # single, real control (honoured exactly down to this floor); this just stops the loop busy-spinning.
 MIN_INTERVAL = 2
+
+# Case-B (full-reload) is expensive (full COPY + ~2× space) → a HARD 12h floor + 24h default so a
+# mis-set cadence can't hammer Oracle / disk. Enforced both here (scheduling) and at PUT (clamp).
+FULL_RELOAD_MIN_INTERVAL = 43200   # 12h
+FULL_RELOAD_DEFAULT_INTERVAL = 86400  # 24h
+
+
+def is_full_reload(cfg: StreamingConfig) -> bool:
+    """A table streams in full-reload mode when it has NO watermark column configured (and the
+    catalog gives no default ts_col)."""
+    table = get_table(cfg.source_view)
+    ts_col = cfg.ts_col or (_default_ts_col(table) if table else None)
+    return not ts_col
+
+
+def effective_interval(cfg: StreamingConfig) -> int:
+    """The real cadence floor for a table: incremental → MIN_INTERVAL; full-reload → 12h floor."""
+    if is_full_reload(cfg):
+        return max(FULL_RELOAD_MIN_INTERVAL, int(cfg.poll_interval_sec or FULL_RELOAD_DEFAULT_INTERVAL))
+    return max(MIN_INTERVAL, int(cfg.poll_interval_sec or 60))
 
 
 def run_all_due(db: Session) -> dict[str, Any]:
     """Run a cycle for every enabled config that is due, and report the sleep the poll loop should
-    use next = the smallest enabled ``poll_interval_sec`` (so the per-table Interval set on the UI
-    is the one and only cadence — no separate loop-tick or 30s floor). poll-loop entry point."""
+    use next = the smallest enabled effective interval (full-reload tables floored at 12h)."""
     now = datetime.now(timezone.utc)
     results: list[dict[str, Any]] = []
     enabled = db.scalars(select(StreamingConfig).where(StreamingConfig.enabled.is_(True))).all()
     for cfg in enabled:
-        interval = max(MIN_INTERVAL, int(cfg.poll_interval_sec or 60))
+        interval = effective_interval(cfg)
         if cfg.last_run_at is not None:
             last = cfg.last_run_at
             if last.tzinfo is None:
@@ -326,6 +362,6 @@ def run_all_due(db: Session) -> dict[str, Any]:
             if (now - last).total_seconds() < interval:
                 continue  # not due yet
         results.append(run_cycle(db, cfg))
-    intervals = [max(MIN_INTERVAL, int(c.poll_interval_sec or 60)) for c in enabled]
+    intervals = [effective_interval(c) for c in enabled]
     next_interval = min(intervals) if intervals else None
     return {"ran": len(results), "results": results, "next_interval": next_interval}

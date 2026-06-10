@@ -810,6 +810,115 @@ def streaming_pull_once(
         _cleanup_run_conf(run_id)  # never leave a streaming cycle's conf behind (runs every few min)
 
 
+def _drop_table(schema: str, name: str) -> None:
+    with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+        conn.exec_driver_sql(f'DROP TABLE IF EXISTS "{schema}"."{name}"')
+
+
+def _atomic_swap(schema: str, target: str, new_target: str, old_target: str, pk_columns: list[str] | None) -> None:
+    """Swap <new_target> into place as <target> in ONE transaction so a reader NEVER sees an empty or
+    missing target: RENAME target→_old, _new→target, (rename its unique index to the canonical name),
+    DROP _old. ALTER … RENAME takes a brief ACCESS EXCLUSIVE lock; a concurrent SELECT either finishes
+    on the old table or waits and then sees the new one — never nothing."""
+    new_idx = f"ux_{new_target}_pk"[:63]
+    canon_idx = f"ux_{target}_pk"[:63]
+    with engine.begin() as conn:  # transactional (NOT autocommit) → all-or-nothing
+        present = conn.exec_driver_sql(
+            f"SELECT to_regclass('\"{schema}\".\"{target}\"')"
+        ).scalar() is not None
+        if present:
+            conn.exec_driver_sql(f'ALTER TABLE "{schema}"."{target}" RENAME TO "{old_target}"')
+        conn.exec_driver_sql(f'ALTER TABLE "{schema}"."{new_target}" RENAME TO "{target}"')
+        if pk_columns:
+            conn.exec_driver_sql(f'ALTER INDEX IF EXISTS "{schema}"."{new_idx}" RENAME TO "{canon_idx}"')
+        if present:
+            conn.exec_driver_sql(f'DROP TABLE "{schema}"."{old_target}"')
+
+
+def full_reload_once(table: Ora2pgTable, *, pk_columns: list[str] | None = None) -> dict[str, Any]:
+    """Case B (no watermark column): full re-copy of the view into ``<target>_new`` then an ATOMIC
+    SWAP so the live target is NEVER empty for readers (Type B outbound). On ANY failure the live
+    target is left untouched and ``<target>_new`` is dropped. Needs ~2× space transiently. Synchronous
+    (runs in the streaming executor thread); never raises. Returns {ok, rows_before, rows_after,
+    rows_added, exit_code, error, log}."""
+    schema = settings.ora2pg_target_schema
+    target = table.target_table
+    new_target = f"{target}_new"
+    old_target = f"{target}_old"
+    run_id = str(uuid.uuid4())
+    log_tail: list[str] = []
+    result: dict[str, Any] = {
+        "ok": False, "rows_before": None, "rows_after": None, "rows_added": None,
+        "exit_code": None, "error": None, "log": [], "mode": "full",
+    }
+    try:
+        result["rows_before"] = _count_target(target)  # None if first load (target absent)
+        _drop_table(schema, new_target)  # clean any leftover temp from a prior crash
+
+        conf = build_ora2pg_conf(table, truncate=True, replace_target=new_target)
+        backend_dir, container_dir = _write_conf(conf, run_id)
+        conf_arg = f"{container_dir}/ora2pg.conf"
+        log_tail.append(f"Generated {conf_arg} (full-reload → {new_target}):\n" + redact_conf(conf))
+
+        try:
+            api, container = _open_ora2pg()
+        except Exception as exc:
+            result["error"] = f"cannot reach ora2pg container '{settings.ora2pg_container}': {exc}"
+            result["log"] = log_tail
+            return result
+
+        # 1) DDL pass → create mdp_staging.<new_target>
+        code, out = _exec_collect(
+            api, container.id,
+            ["ora2pg", "-c", conf_arg, "-t", "TABLE", "-b", container_dir, "-o", "auto_schema.sql"],
+        )
+        log_tail.append(out)
+        if code != 0:
+            _drop_table(schema, new_target)
+            result["error"] = f"ora2pg TABLE (DDL) failed (exit {code}).\n{out[-400:]}"
+            result["log"] = log_tail[-40:]
+            return result
+        ddl_path = os.path.join(backend_dir, "auto_schema.sql")
+        ddl_sql = ""
+        if os.path.exists(ddl_path):
+            with open(ddl_path, encoding="utf-8") as fh:
+                ddl_sql = fh.read()
+        _apply_ddl(schema, ddl_sql, target_table=new_target)
+        _ensure_audit_cols(schema, new_target, run_id)
+        if pk_columns:
+            try:
+                _ensure_unique_index(schema, new_target, pk_columns)
+            except Exception as exc:
+                log_tail.append(f"warning: could not create unique PK index on {new_target}: {exc}")
+
+        # 2) COPY pass → load <new_target> (truncate=True in conf)
+        started = time.monotonic()
+        exit_code, err = _copy_stream(api, container.id, run_id, started, log_tail, action="COPY", conf_path=conf_arg)
+        result["exit_code"] = exit_code
+        if err or exit_code not in (0, None):
+            _drop_table(schema, new_target)  # live target untouched
+            result["error"] = err or f"ora2pg full COPY failed (exit {exit_code})"
+            result["log"] = log_tail[-40:]
+            return result
+
+        # 3) ATOMIC SWAP — live target never empty
+        _atomic_swap(schema, target, new_target, old_target, pk_columns)
+        result["rows_after"] = _count_target(target)
+        rb, ra = result["rows_before"], result["rows_after"]
+        result["rows_added"] = (ra - rb) if (rb is not None and ra is not None) else ra
+        result["ok"] = True
+        result["log"] = log_tail[-40:]
+        return result
+    except Exception as exc:  # pragma: no cover - a cycle must never crash the poll loop
+        _drop_table(schema, new_target)  # never leave a half-built temp; live target untouched
+        result["error"] = f"full-reload error: {exc}"
+        result["log"] = log_tail[-40:]
+        return result
+    finally:
+        _drop_progress(run_id)
+        _cleanup_run_conf(run_id)
+
+
 def _map_pk_to_view(index_cols: dict[str, list[tuple[int, str]]], view_cols: set[str]) -> tuple[list[str] | None, list[str]]:
     """Given a base table's unique indexes ({index_name: [(pos, COL)]}) and the V2_PRO_ view's
     columns, return (pk_columns_lowercased, unmapped). A column maps when the view exposes it

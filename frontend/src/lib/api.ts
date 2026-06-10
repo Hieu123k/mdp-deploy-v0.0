@@ -979,9 +979,12 @@ export type StreamingTable = {
   enabled: boolean;
   ts_col: string | null;
   ts_time_col: string | null;
+  ts_kind: string | null; // date | sequence
   granularity: string;
   poll_interval_sec: number;
   lookback_days: number;
+  mode?: string; // incremental | full
+  min_interval_sec?: number;
   last_watermark: string | null;
   last_watermark_time: string | null;
   last_run_at: string | null;
@@ -1001,7 +1004,11 @@ export type StreamingConfigUpdate = Partial<{
   lookback_days: number;
   ts_col: string;
   ts_time_col: string;
+  ts_kind: string;
 }>;
+export type StreamingProbe = { table: string; columns: string[]; upmt_candidates: string[]; error: string | null };
+export const streamingProbe = (table: string) =>
+  req<StreamingProbe>(`/streaming/probe/${encodeURIComponent(table)}`);
 export type StreamingRunResult = {
   ok: boolean;
   rows_added: number | null;

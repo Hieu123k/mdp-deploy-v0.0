@@ -10,13 +10,23 @@ import { Select } from "@/components/ui/Select";
 import { Table, THead, TBody, TR, TH, TD } from "@/components/ui/Table";
 import {
   ApiError,
+  streamingProbe,
   streamingRunOnce,
   streamingStatus,
   streamingUpdateConfig,
   type StreamingTable,
 } from "@/lib/api";
 
-type StreamDraft = { enabled: boolean; granularity: string; poll_interval_sec: number; lookback_days: number };
+const FULL_RELOAD_MIN = 43200; // 12h — backend hard floor for full-reload tables
+
+type StreamDraft = {
+  enabled: boolean;
+  ts_col: string; // "" → full reload
+  ts_kind: string; // date | sequence
+  granularity: string;
+  poll_interval_sec: number;
+  lookback_days: number;
+};
 
 /** Format an ISO timestamp as a readable local datetime, e.g. "2026-06-09 11:48:51". */
 function fmtRunAt(iso?: string | null): string {
@@ -27,28 +37,31 @@ function fmtRunAt(iso?: string | null): string {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
-/** Streaming (watermark-incremental) per-table editor: enable → auto-migrates; "Run every (s)" is
- * the single cadence (min 2s). Edits go to a local draft until Apply. Shows cursor / status /
- * last_error. Used by the /streaming tab (relocated out of Settings). */
+const draftFrom = (t: StreamingTable): StreamDraft => ({
+  enabled: t.enabled,
+  ts_col: t.ts_col ?? "",
+  ts_kind: t.ts_kind ?? "date",
+  granularity: t.granularity,
+  poll_interval_sec: t.poll_interval_sec,
+  lookback_days: t.lookback_days,
+});
+
+/** Streaming per-table editor (2-case, prompt 35): pick a watermark column (dropdown of the view's
+ * columns) for incremental, or "(none) → full reload" (atomic swap, ≥12h). Edits are a local draft
+ * until Apply. */
 export function StreamingEditor() {
   const [streaming, setStreaming] = useState<StreamingTable[] | null>(null);
   const [avail, setAvail] = useState(true);
   const [msg, setMsg] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [drafts, setDrafts] = useState<Record<string, StreamDraft>>({});
+  const [cols, setCols] = useState<Record<string, string[] | "loading">>({});
 
   const load = useCallback(async () => {
     try {
       const s = await streamingStatus();
       setStreaming(s.tables);
-      setDrafts(
-        Object.fromEntries(
-          s.tables.map((t) => [
-            t.source_view,
-            { enabled: t.enabled, granularity: t.granularity, poll_interval_sec: t.poll_interval_sec, lookback_days: t.lookback_days },
-          ]),
-        ),
-      );
+      setDrafts(Object.fromEntries(s.tables.map((t) => [t.source_view, draftFrom(t)])));
       setAvail(true);
     } catch {
       setAvail(false);
@@ -59,40 +72,42 @@ export function StreamingEditor() {
     void load();
   }, [load]);
 
-  const draftOf = (t: StreamingTable): StreamDraft =>
-    drafts[t.source_view] ?? {
-      enabled: t.enabled,
-      granularity: t.granularity,
-      poll_interval_sec: t.poll_interval_sec,
-      lookback_days: t.lookback_days,
-    };
+  const probeCols = useCallback(async (view: string) => {
+    setCols((c) => (c[view] ? c : { ...c, [view]: "loading" }));
+    try {
+      const r = await streamingProbe(view);
+      setCols((c) => ({ ...c, [view]: r.columns ?? [] }));
+    } catch {
+      setCols((c) => ({ ...c, [view]: [] }));
+    }
+  }, []);
+
+  const draftOf = (t: StreamingTable): StreamDraft => drafts[t.source_view] ?? draftFrom(t);
   const setDraft = (view: string, partial: Partial<StreamDraft>) =>
-    setDrafts((d) => ({ ...d, [view]: { ...d[view], ...partial } }));
+    setDrafts((d) => ({ ...d, [view]: { ...(d[view] ?? {}), ...partial } as StreamDraft }));
   const isDirty = (t: StreamingTable): boolean => {
     const d = drafts[t.source_view];
-    return (
-      !!d &&
-      (d.enabled !== t.enabled ||
-        d.granularity !== t.granularity ||
-        d.poll_interval_sec !== t.poll_interval_sec ||
-        d.lookback_days !== t.lookback_days)
-    );
+    const o = draftFrom(t);
+    return !!d && (Object.keys(o) as (keyof StreamDraft)[]).some((k) => d[k] !== o[k]);
   };
 
   const apply = async (t: StreamingTable) => {
     const d = draftOf(t);
+    const full = !d.ts_col;
     setBusy(t.source_view);
     setMsg(null);
     try {
       await streamingUpdateConfig(t.source_view, {
         enabled: d.enabled,
+        ts_col: d.ts_col, // "" clears → full reload
+        ts_kind: d.ts_kind,
         granularity: d.granularity,
-        poll_interval_sec: d.poll_interval_sec,
+        poll_interval_sec: full ? Math.max(FULL_RELOAD_MIN, d.poll_interval_sec) : d.poll_interval_sec,
         lookback_days: d.lookback_days,
       });
       setMsg(
-        `${t.source_view}: applied — ${d.enabled ? "enabled" : "disabled"}, ${d.granularity}, every ${d.poll_interval_sec}s.` +
-          (d.enabled ? " The background loop picks it up within one tick." : ""),
+        `${t.source_view}: applied — ${d.enabled ? "enabled" : "disabled"}, ` +
+          (full ? `FULL reload (≥12h)` : `incremental (ts:${d.ts_col}, ${d.ts_kind})`) + ".",
       );
       await load();
     } catch (e) {
@@ -121,10 +136,10 @@ export function StreamingEditor() {
       <CardHeader
         title={
           <span className="inline-flex items-center gap-2">
-            <Radio size={16} /> Streaming (watermark-incremental)
+            <Radio size={16} /> Streaming (2-case: incremental / full-reload)
           </span>
         }
-        subtitle="Enable a table and it auto-migrates. 'Run every' is the single cadence (min 2s). Timestamp unlocks only when the view exposes a time column (UPMT)."
+        subtitle="Pick a watermark column for incremental sync, or '(none)' for full-reload (atomic swap, min 12h). Sequence = monotonic id (e.g. ILUKID); date = Julian UPMJ."
         action={
           <Button variant="secondary" size="sm" onClick={() => void load()}>
             Refresh
@@ -142,7 +157,7 @@ export function StreamingEditor() {
                 <TR>
                   <TH>Enabled</TH>
                   <TH>Table</TH>
-                  <TH>Granularity</TH>
+                  <TH>Watermark / mode</TH>
                   <TH>Run every (s)</TH>
                   <TH>Lookback (d)</TH>
                   <TH>Cursor / status</TH>
@@ -154,6 +169,12 @@ export function StreamingEditor() {
                 {(streaming ?? []).map((t) => {
                   const d = draftOf(t);
                   const dirty = isDirty(t);
+                  const full = !d.ts_col;
+                  const opts = cols[t.source_view];
+                  const colList = Array.isArray(opts) ? opts : [];
+                  // keep the currently-selected col visible even before a probe loads
+                  const colOptions = Array.from(new Set([...(d.ts_col ? [d.ts_col] : []), ...colList]));
+                  const minInt = full ? FULL_RELOAD_MIN : 2;
                   return (
                     <TR key={t.source_view}>
                       <TD>
@@ -169,32 +190,59 @@ export function StreamingEditor() {
                         {t.source_view}
                         {dirty ? <span className="ml-1.5 text-xs text-warning">unsaved</span> : null}
                       </TD>
-                      <TD>
-                        <Select
-                          value={d.granularity}
-                          disabled={busy === t.source_view}
-                          onChange={(e) => setDraft(t.source_view, { granularity: e.target.value })}
-                        >
-                          <option value="day">day</option>
-                          <option value="timestamp" disabled={!t.has_ts_time_col}>
-                            timestamp{t.has_ts_time_col ? "" : " (no time col)"}
-                          </option>
-                        </Select>
+                      <TD className="min-w-[15rem]">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <Badge tone={full ? "warning" : "success"}>
+                            {full ? "full reload (≥12h)" : `incremental (ts:${d.ts_col})`}
+                          </Badge>
+                          <Select
+                            aria-label={`Watermark column for ${t.source_view}`}
+                            value={d.ts_col}
+                            disabled={busy === t.source_view}
+                            onMouseDown={() => void probeCols(t.source_view)}
+                            onChange={(e) => setDraft(t.source_view, { ts_col: e.target.value })}
+                            className="max-w-[10rem]"
+                          >
+                            <option value="">(none) → full reload</option>
+                            {opts === "loading" && <option disabled>loading columns…</option>}
+                            {colOptions.map((c) => (
+                              <option key={c} value={c}>
+                                {c}
+                              </option>
+                            ))}
+                          </Select>
+                          {!full && (
+                            <Select
+                              aria-label={`Watermark kind for ${t.source_view}`}
+                              value={d.ts_kind}
+                              disabled={busy === t.source_view}
+                              onChange={(e) => setDraft(t.source_view, { ts_kind: e.target.value })}
+                              className="max-w-[7rem]"
+                            >
+                              <option value="date">date (Julian)</option>
+                              <option value="sequence">sequence (id)</option>
+                            </Select>
+                          )}
+                        </div>
                       </TD>
                       <TD>
                         <Input
                           type="number"
-                          min={2}
+                          min={minInt}
                           value={d.poll_interval_sec}
-                          className="max-w-[6rem]"
-                          onChange={(e) => setDraft(t.source_view, { poll_interval_sec: Math.max(2, Number(e.target.value) || 2) })}
+                          className="max-w-[7rem]"
+                          onChange={(e) =>
+                            setDraft(t.source_view, { poll_interval_sec: Math.max(minInt, Number(e.target.value) || minInt) })
+                          }
                         />
+                        {full && <div className="text-[10px] text-neutral-400">min 12h (43200)</div>}
                       </TD>
                       <TD>
                         <Input
                           type="number"
                           min={0}
                           value={d.lookback_days}
+                          disabled={full || d.ts_kind === "sequence"}
                           className="max-w-[5rem]"
                           onChange={(e) => setDraft(t.source_view, { lookback_days: Math.max(0, Number(e.target.value) || 0) })}
                         />

@@ -101,6 +101,7 @@ def build_ora2pg_conf(
     truncate: bool = True,
     where_clause: str | None = None,
     insert_on_conflict: bool = False,
+    replace_target: str | None = None,
 ) -> str:
     """Render an ora2pg.conf for one table (mirrors tools/ora2pg migrate.sh dynamic config).
 
@@ -156,6 +157,11 @@ def build_ora2pg_conf(
     ]
     if insert_on_conflict:
         lines.append("INSERT_ON_CONFLICT 1")
+    if replace_target:
+        # Redirect ora2pg's PG output table name (default = lower(view)) to a different table — used
+        # by the Case-B full-reload to load into <target>_new before an atomic swap. Source view
+        # (ALLOW/VIEW_AS_TABLE) is unchanged; only the OUTPUT table name is renamed.
+        lines.append(f"REPLACE_TABLES   {table.table}:{replace_target}")
     if where_clause:
         lines.append(f"WHERE            {where_clause}")
     elif test_rows and test_rows > 0:

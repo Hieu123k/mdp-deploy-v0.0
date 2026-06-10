@@ -25,8 +25,9 @@ router = APIRouter(
 
 class StreamingConfigUpdate(BaseModel):
     enabled: bool | None = None
-    ts_col: str | None = None
+    ts_col: str | None = None  # "" → clear (full-reload mode)
     ts_time_col: str | None = None
+    ts_kind: str | None = None  # date | sequence
     granularity: str | None = None
     poll_interval_sec: int | None = None
     lookback_days: int | None = None
@@ -60,6 +61,19 @@ def put_config(
     fields = payload.model_dump(exclude_none=True)
     if "granularity" in fields and fields["granularity"] not in streaming_service.GRANULARITIES:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="granularity must be day|timestamp")
+    if "ts_kind" in fields and fields["ts_kind"] not in ("date", "sequence"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="ts_kind must be date|sequence")
+
+    # Case-B (full-reload) interval floor: a table with no watermark column copies the WHOLE view
+    # every cycle, so clamp poll_interval_sec to the 12h hard floor (BE enforce; UI also sets min).
+    cfg_existing = streaming_service.get_config(db, table.table)
+    new_ts_col = (
+        (fields["ts_col"] or "").strip() if "ts_col" in fields
+        else ((cfg_existing.ts_col or "").strip() if cfg_existing else "")
+    )
+    if not new_ts_col and "poll_interval_sec" in fields:
+        if int(fields["poll_interval_sec"]) < streaming_service.FULL_RELOAD_MIN_INTERVAL:
+            fields["poll_interval_sec"] = streaming_service.FULL_RELOAD_MIN_INTERVAL
 
     # timestamp granularity needs a real time-of-day column — require it to be configured (in this
     # request or already saved) AND confirmed present in the view.

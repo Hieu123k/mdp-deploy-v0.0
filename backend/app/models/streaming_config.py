@@ -33,8 +33,12 @@ class StreamingConfig(Base):
     source_view: Mapped[str] = mapped_column(String(150), unique=True, index=True, nullable=False)
     target_table: Mapped[str | None] = mapped_column(String(150), nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
-    ts_col: Mapped[str | None] = mapped_column(String(150), nullable=True)  # e.g. GLUPMJ (Julian day)
+    ts_col: Mapped[str | None] = mapped_column(String(150), nullable=True)  # e.g. GLUPMJ (Julian day); None = full-reload
     ts_time_col: Mapped[str | None] = mapped_column(String(150), nullable=True)  # e.g. GLUPMT (time-of-day)
+    # Watermark kind: 'date' (Julian CYYDDD → >= cursor-lookback, dedup) or 'sequence' (monotonic id
+    # like ILUKID → strict > cursor, no lookback). Julian dates and UKIDs are both NUMBER in Oracle,
+    # so the operator picks the kind explicitly — it can't be auto-detected from the column type.
+    ts_kind: Mapped[str] = mapped_column(String(20), nullable=False, default="date", server_default="date")
     granularity: Mapped[str] = mapped_column(String(20), nullable=False, default="day", server_default="day")
     poll_interval_sec: Mapped[int] = mapped_column(Integer, nullable=False, default=300, server_default="300")
     lookback_days: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
