@@ -725,8 +725,10 @@ def target_max_watermark(
                     if not row or row[0] is None:
                         return None, None
                     return str(row[0]), (None if row[1] is None else str(row[1]))
+                # Cast via ::text so this works whether ora2pg made the column NUMERIC or TEXT
+                # (MODIFY_TYPE *:text vs DEFAULT_NUMERIC differ per table); numeric MAX, not lexical.
                 expr = (
-                    f'MAX(NULLIF("{tcol}", \'\')::numeric)' if numeric else f'MAX("{tcol}")'
+                    f'MAX(NULLIF("{tcol}"::text, \'\')::numeric)' if numeric else f'MAX("{tcol}")'
                 )
                 cur.execute(f'SELECT {expr} FROM "{schema}"."{target_table}"')
                 row = cur.fetchone()

@@ -229,10 +229,11 @@ def run_cycle(db: Session, cfg: StreamingConfig, *, force: bool = False) -> dict
     # Authoritative: the saved ts_col IS the choice (None/"" → Case B full-reload). No hint fallback.
     ts_col = (cfg.ts_col or "").strip() or None
 
-    # Canonical PK = migration_jobs.primary_key_columns (set by discover-keys or the dashboard PK
-    # editor). Prefer it so a PK change on the Migration dashboard takes effect for streaming too;
-    # fall back to the config's own copy, then live discovery. Keep the config in sync for display.
-    pk = _job_pk(db, table) or cfg.primary_key_columns or _discover_pk(table)
+    # Canonical PK = migration_jobs.primary_key_columns (seeded from reference / set by discover-keys
+    # / the dashboard PK editor), then the config's own copy. NO live auto-discovery here: a CLEARED
+    # PK must STAY cleared (so the table deliberately falls to Case B full-reload), and a per-cycle
+    # Oracle round-trip would be wasteful. PK is configured explicitly, not re-guessed every cycle.
+    pk = _job_pk(db, table) or cfg.primary_key_columns
     if pk and cfg.primary_key_columns != pk:
         cfg.primary_key_columns = pk
 
