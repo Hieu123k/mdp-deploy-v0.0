@@ -428,7 +428,7 @@ def _worker(run_id: str, table: Ora2pgTable, test_rows: int, pk_columns: list[st
     _set(
         run_id, status="success", phase="done",
         rows_done=target_count if target_count is not None else snap.get("rows_done", 0),
-        pct=100.0, eta_sec=0, elapsed_sec=round(elapsed, 1),
+        pct=100.0, eta_sec=None, elapsed_sec=round(elapsed, 1),  # done → no ETA (UI shows "—")
         message=f"Done — {target_count} rows in mdp_staging.{table.target_table}",
     )
     _persist(
