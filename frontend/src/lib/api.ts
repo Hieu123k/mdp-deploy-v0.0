@@ -179,11 +179,21 @@ export type DataModelAttribute = {
   source_column?: string | null;
 };
 
+/** Type B multi-table join (prompt 38). The base table = the primary-key attribute's table; each
+ * join brings in a table on its (unique, unless allow_fanout) key. */
+export type TypeBJoin = {
+  type: "left" | "inner";
+  left: { table: string; column: string };
+  right: { schema: string; table: string; column: string };
+  allow_fanout?: boolean;
+};
+
 export type DataModel = {
   id: string;
   name: string;
   display_name: string | null;
   type: "A" | "B";
+  relationships?: TypeBJoin[] | null;
   category?: string | null;
   namespace?: string | null;
   entity_type?: string | null;
@@ -243,6 +253,7 @@ export type DataModelCreate = {
   name: string;
   display_name?: string;
   type: "A" | "B";
+  relationships?: TypeBJoin[] | null;
   category?: string | null;
   namespace?: string | null;
   domain?: string | null;

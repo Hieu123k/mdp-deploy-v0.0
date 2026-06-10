@@ -34,6 +34,7 @@ import {
   type AttrType,
   type DataModel,
   type DataModelAttribute,
+  type TypeBJoin,
   type DataModelCreate,
   type DataModelTemplate,
   type DbColumn,
@@ -112,6 +113,7 @@ type FormState = {
   ai_enabled: boolean;
   status: string;
   attributes: DataModelAttribute[];
+  relationships: TypeBJoin[];
 };
 
 type TemplateForm = {
@@ -177,6 +179,7 @@ function initialForm(): FormState {
         is_primary_key: true,
       },
     ],
+    relationships: [],
   };
 }
 
@@ -214,6 +217,7 @@ function formFromModel(model: DataModel): FormState {
     ai_enabled: model.ai_enabled ?? true,
     status: model.status || "active",
     attributes: (model.attributes || []).map((attribute) => ({ ...attribute })),
+    relationships: (model.relationships || []).map((join) => ({ ...join })),
   };
 }
 
@@ -240,6 +244,21 @@ function typeBSource(model: DataModel | FormState): { source_schema: string; sou
 
 function previewRows(preview: ModelPreview | null): Record<string, unknown>[] {
   return preview?.data || preview?.records || [];
+}
+
+function isCompleteJoin(join: TypeBJoin): boolean {
+  return !!(
+    join.left?.table && join.left?.column &&
+    join.right?.schema && join.right?.table && join.right?.column
+  );
+}
+
+function emptyJoin(baseSchema: string): TypeBJoin {
+  return {
+    type: "left",
+    left: { table: "", column: "" },
+    right: { schema: baseSchema || "mdp_staging", table: "", column: "" },
+  };
 }
 
 function cellText(value: unknown): string {
@@ -469,6 +488,19 @@ export default function DataModelsPage() {
     });
   }
 
+  function addJoin() {
+    setForm((current) => ({ ...current, relationships: [...current.relationships, emptyJoin(sourceSchema)] }));
+  }
+  function updateJoin(index: number, patch: Partial<TypeBJoin>) {
+    setForm((current) => ({
+      ...current,
+      relationships: current.relationships.map((join, i) => (i === index ? { ...join, ...patch } : join)),
+    }));
+  }
+  function removeJoin(index: number) {
+    setForm((current) => ({ ...current, relationships: current.relationships.filter((_, i) => i !== index) }));
+  }
+
   function addAttribute() {
     setForm((current) => ({
       ...current,
@@ -546,14 +578,18 @@ export default function DataModelsPage() {
           display_name: emptyToNull(attribute.display_name || "") || titleize(name),
           description: emptyToNull(attribute.description || ""),
           sensitivity: emptyToNull(attribute.sensitivity || ""),
-          source_schema: form.type === "B" ? sourceSchema : attribute.source_schema || undefined,
-          source_table: form.type === "B" ? sourceTable : attribute.source_table || undefined,
-          source_column: form.type === "B" ? attribute.source_column || undefined : attribute.source_column || undefined,
+          // Per-attribute source overrides the base table (multi-table, prompt 38); blank = base.
+          source_schema: form.type === "B" ? attribute.source_schema || sourceSchema : attribute.source_schema || undefined,
+          source_table: form.type === "B" ? attribute.source_table || sourceTable : attribute.source_table || undefined,
+          source_column: attribute.source_column || undefined,
           is_primary_key: attribute.is_primary_key || name === form.primary_key,
         };
       });
     const primary = form.primary_key || attributes.find((attribute) => attribute.is_primary_key)?.name || "";
+    const relationships =
+      form.type === "B" ? form.relationships.filter(isCompleteJoin) : null;
     return {
+      relationships: relationships && relationships.length ? relationships : null,
       name: snake(form.name),
       display_name: form.display_name.trim() || titleize(form.name),
       type: form.type,
@@ -1416,7 +1452,91 @@ export default function DataModelsPage() {
           <span className="text-xs text-neutral-500">Reserved system columns are automatically renamed with source_ prefix.</span>
         </div>
         {renderAttributesTable(true)}
+        {renderRelationshipsEditor()}
       </DrawerSection>
+    );
+  }
+
+  function renderRelationshipsEditor() {
+    return (
+      <div className="mt-4 rounded-md border border-neutral-200 p-3">
+        <div className="mb-2 flex items-center justify-between">
+          <div>
+            <h4 className="text-sm font-semibold text-neutral-700">Relationships / Joins (multi-table)</h4>
+            <p className="text-xs text-neutral-500">
+              The base table is the primary-key attribute&apos;s table. Add a join to pull columns from
+              another table — <code>right.column</code> must be unique (N:1) unless you allow fan-out.
+            </p>
+          </div>
+          <Button size="sm" variant="secondary" onClick={addJoin}>Add Join</Button>
+        </div>
+        {form.relationships.length === 0 ? (
+          <p className="text-xs text-neutral-400">No joins — single-table model.</p>
+        ) : (
+          <div className="space-y-2">
+            {form.relationships.map((join, index) => (
+              <div key={index} className="grid items-end gap-2 rounded border border-neutral-100 p-2 md:grid-cols-12">
+                <Select
+                  label="Type"
+                  value={join.type}
+                  onChange={(event) => updateJoin(index, { type: event.target.value as TypeBJoin["type"] })}
+                  className="h-8 text-xs md:col-span-2"
+                >
+                  <option value="left">left</option>
+                  <option value="inner">inner</option>
+                </Select>
+                <Input
+                  label="Left table"
+                  placeholder={sourceTable || "base"}
+                  value={join.left.table}
+                  onChange={(event) => updateJoin(index, { left: { ...join.left, table: event.target.value.trim() } })}
+                  className="h-8 font-mono text-[11px] md:col-span-2"
+                />
+                <Input
+                  label="Left column"
+                  value={join.left.column}
+                  onChange={(event) => updateJoin(index, { left: { ...join.left, column: event.target.value.trim() } })}
+                  className="h-8 font-mono text-[11px] md:col-span-2"
+                />
+                <Input
+                  label="Right schema"
+                  value={join.right.schema}
+                  onChange={(event) => updateJoin(index, { right: { ...join.right, schema: event.target.value.trim() } })}
+                  className="h-8 font-mono text-[11px] md:col-span-1"
+                />
+                <Input
+                  label="Right table"
+                  value={join.right.table}
+                  onChange={(event) => updateJoin(index, { right: { ...join.right, table: event.target.value.trim() } })}
+                  className="h-8 font-mono text-[11px] md:col-span-2"
+                />
+                <Input
+                  label="Right column"
+                  value={join.right.column}
+                  onChange={(event) => updateJoin(index, { right: { ...join.right, column: event.target.value.trim() } })}
+                  className="h-8 font-mono text-[11px] md:col-span-2"
+                />
+                <label className="flex items-center gap-1 text-[11px] text-neutral-600 md:col-span-1">
+                  <input
+                    type="checkbox"
+                    checked={!!join.allow_fanout}
+                    onChange={(event) => updateJoin(index, { allow_fanout: event.target.checked })}
+                  />
+                  fan-out
+                </label>
+                <button
+                  type="button"
+                  title="Remove join"
+                  onClick={() => removeJoin(index)}
+                  className="h-8 rounded-md px-2 text-danger hover:bg-danger/10 md:col-span-1"
+                >
+                  Remove
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
     );
   }
 
@@ -1438,7 +1558,7 @@ export default function DataModelsPage() {
             <TH>Attribute</TH>
             <TH>Display Name</TH>
             <TH>Data Type</TH>
-            {typeB && <TH>Source Column</TH>}
+            {typeB && <TH>Source table / column</TH>}
             <TH className="text-center">Required</TH>
             <TH className="text-center">Primary</TH>
             {!typeB && <TH>Description</TH>}
@@ -1479,27 +1599,54 @@ export default function DataModelsPage() {
               </TD>
               {typeB && (
                 <TD>
-                  <Select
-                    aria-label="Source column"
-                    value={attribute.source_column || ""}
-                    onChange={(event) => {
-                      const source_column = event.target.value;
-                      updateAttribute(index, {
-                        source_column,
-                        source_schema: sourceSchema,
-                        source_table: sourceTable,
-                        data_type: sourceColumnType(source_column),
-                      });
-                    }}
-                    className="h-8 font-mono text-xs"
-                  >
-                    <option value="">- column -</option>
-                    {columns.map((column) => (
-                      <option key={column.column_name} value={column.column_name}>
-                        {column.column_name}
-                      </option>
-                    ))}
-                  </Select>
+                  {/* Per-attribute source: blank table = the base table; set another table for a join
+                      column (prompt 38, multi-table). */}
+                  <div className="flex flex-col gap-1">
+                    <Input
+                      aria-label="Source table (blank = base)"
+                      placeholder={sourceTable ? `${sourceTable} (base)` : "base table"}
+                      value={attribute.source_table || ""}
+                      onChange={(event) => {
+                        const value = event.target.value.trim();
+                        updateAttribute(index, {
+                          source_table: value || undefined,
+                          source_schema: value ? attribute.source_schema || sourceSchema : undefined,
+                        });
+                      }}
+                      className="h-7 font-mono text-[11px]"
+                    />
+                    {!attribute.source_table || attribute.source_table === sourceTable ? (
+                      <Select
+                        aria-label="Source column"
+                        value={attribute.source_column || ""}
+                        onChange={(event) => {
+                          const source_column = event.target.value;
+                          updateAttribute(index, {
+                            source_column,
+                            source_schema: sourceSchema,
+                            source_table: sourceTable,
+                            data_type: sourceColumnType(source_column),
+                          });
+                        }}
+                        className="h-7 font-mono text-[11px]"
+                      >
+                        <option value="">- column -</option>
+                        {columns.map((column) => (
+                          <option key={column.column_name} value={column.column_name}>
+                            {column.column_name}
+                          </option>
+                        ))}
+                      </Select>
+                    ) : (
+                      <Input
+                        aria-label="Source column"
+                        placeholder="source_column"
+                        value={attribute.source_column || ""}
+                        onChange={(event) => updateAttribute(index, { source_column: event.target.value })}
+                        className="h-7 font-mono text-[11px]"
+                      />
+                    )}
+                  </div>
                 </TD>
               )}
               <TD className="text-center">
