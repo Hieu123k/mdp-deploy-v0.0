@@ -1,5 +1,9 @@
 from fastapi.testclient import TestClient
+from sqlalchemy import select, text
+from sqlalchemy.orm import Session
 
+from app.models.data_model import DataModel
+from app.services.outbound_service import query_type_b_record_by_key
 from tests.test_data_models import type_b_payload
 
 
@@ -189,10 +193,12 @@ def test_validate_mapping_fails_for_invalid_identifier(
     assert response.status_code == 422
 
 
-def test_validate_mapping_fails_for_multiple_source_tables(
+def test_validate_mapping_fails_for_multiple_source_tables_without_join(
     client: TestClient,
     auth_headers: dict[str, str],
 ) -> None:
+    # Prompt 38: multiple source tables are now allowed — but only when joined. A second table with
+    # no relationship to the base is an ORPHAN and must be rejected.
     seed_staging(client, auth_headers)
     payload = type_b_payload()
     payload["attributes"][1]["source_table"] = "stg_jde_po_header"
@@ -205,7 +211,7 @@ def test_validate_mapping_fails_for_multiple_source_tables(
     )
 
     assert response.status_code == 422
-    assert "only one source table" in str(response.json()["detail"])
+    assert "not joined to the base" in str(response.json()["detail"])
 
 
 def test_validate_mapping_fails_for_incompatible_data_type(
@@ -292,10 +298,13 @@ def test_type_b_primary_key_must_reference_valid_mapping(
     )
 
 
-def test_type_b_primary_key_source_column_nullable_returns_warning(
+def test_type_b_primary_key_non_unique_column_rejected(
     client: TestClient,
     auth_headers: dict[str, str],
 ) -> None:
+    # Prompt 38 (MT6): the primary key must uniquely identify a row. `country` repeats across
+    # suppliers, so it is now a hard error (previously only a nullable warning). The nullable-PK
+    # WARNING path remains covered by test_validate_mapping_view_primary_key_nullable_returns_warning.
     seed_staging(client, auth_headers)
     payload = type_b_payload()
     payload["primary_key"] = "country"
@@ -315,12 +324,8 @@ def test_type_b_primary_key_source_column_nullable_returns_warning(
         json=payload,
     )
 
-    assert response.status_code == 200
-    warnings = response.json()["warnings"]
-    assert {
-        "field": "primary_key",
-        "message": "Primary key source column is nullable. Ensure values are unique and not null.",
-    } in warnings
+    assert response.status_code == 422
+    assert "not unique" in str(response.json()["detail"])
 
 
 def test_validate_mapping_view_primary_key_nullable_returns_warning(
@@ -380,3 +385,148 @@ def test_type_b_requests_require_authentication(client: TestClient) -> None:
 
     assert validate_response.status_code == 401
     assert preview_response.status_code == 401
+
+
+# --- Prompt 38: multi-table Type B mapping (MT1–MT8) ----------------------------------------------
+
+def seed_mt_tables(db_session: Session) -> None:
+    """Three joinable fixtures: dm_t_head (base, UNIQUE head_id) → dm_t_lookup (N:1, UNIQUE
+    lookup_code) and dm_t_lines (1:N, head_id REPEATS → fan-out). Created unqualified in the test DB
+    (schema is nominal on sqlite); attributes reference them via source_schema='mdp_staging'."""
+    for ddl in (
+        "CREATE TABLE IF NOT EXISTS dm_t_head (head_id TEXT PRIMARY KEY, lookup_code TEXT, title TEXT)",
+        "CREATE TABLE IF NOT EXISTS dm_t_lookup (lookup_code TEXT, lookup_name TEXT, ref_num INTEGER)",
+        "CREATE TABLE IF NOT EXISTS dm_t_lines (head_id TEXT, line_no INTEGER, qty INTEGER)",
+    ):
+        db_session.execute(text(ddl))
+    db_session.execute(text("DELETE FROM dm_t_head"))
+    db_session.execute(text("DELETE FROM dm_t_lookup"))
+    db_session.execute(text("DELETE FROM dm_t_lines"))
+    db_session.execute(text("INSERT INTO dm_t_head VALUES ('h1','lc1','Head One'),('h2','lc2','Head Two')"))
+    db_session.execute(text("INSERT INTO dm_t_lookup VALUES ('lc1','Alpha',1),('lc2','Beta',2)"))
+    db_session.execute(text("INSERT INTO dm_t_lines VALUES ('h1',1,10),('h1',2,20),('h2',1,5)"))
+    db_session.commit()
+
+
+def _attr(name, col, *, table="dm_t_head", dtype="text", pk=False, schema="mdp_staging"):
+    return {
+        "name": name, "data_type": dtype, "source_schema": schema,
+        "source_table": table, "source_column": col, "is_primary_key": pk,
+    }
+
+
+def _mt_model(name, attributes, relationships=None, primary_key="head_id"):
+    return {
+        "name": name, "display_name": name, "type": "B", "primary_key": primary_key,
+        "attributes": attributes, "relationships": relationships or [],
+    }
+
+
+JOIN_HEAD_LOOKUP = {
+    "type": "left",
+    "left": {"table": "dm_t_head", "column": "lookup_code"},
+    "right": {"schema": "mdp_staging", "table": "dm_t_lookup", "column": "lookup_code"},
+}
+
+
+def test_mt1_n_to_1_join_ok(client: TestClient, auth_headers: dict[str, str], db_session: Session) -> None:
+    seed_mt_tables(db_session)
+    payload = _mt_model("mt1_head", [
+        _attr("head_id", "head_id", pk=True),
+        _attr("title", "title"),
+        _attr("lookup_name", "lookup_name", table="dm_t_lookup"),
+    ], [JOIN_HEAD_LOOKUP])
+    r = client.post("/data-models/type-b/preview", headers=auth_headers, json=payload)
+    assert r.status_code == 200, r.json()
+    body = r.json()
+    assert body["count"] == 2
+    by_id = {row["head_id"]: row for row in body["data"]}
+    assert by_id["h1"]["lookup_name"] == "Alpha"
+    assert by_id["h2"]["lookup_name"] == "Beta"
+
+
+def test_mt2_outbound_by_key(client: TestClient, auth_headers: dict[str, str], db_session: Session) -> None:
+    seed_mt_tables(db_session)
+    payload = _mt_model("mt2_head", [
+        _attr("head_id", "head_id", pk=True),
+        _attr("lookup_name", "lookup_name", table="dm_t_lookup"),
+    ], [JOIN_HEAD_LOOKUP])
+    created = client.post("/data-models", headers=auth_headers, json=payload)
+    assert created.status_code == 201, created.json()
+    model = db_session.execute(select(DataModel).where(DataModel.name == "mt2_head")).scalar_one()
+    record = query_type_b_record_by_key(db_session, model=model, key="h1")
+    assert record is not None
+    assert record["lookup_name"] == "Alpha"
+
+
+def test_mt3_fanout_blocked_then_allowed(client: TestClient, auth_headers: dict[str, str], db_session: Session) -> None:
+    seed_mt_tables(db_session)
+    join_lines = {
+        "type": "left",
+        "left": {"table": "dm_t_head", "column": "head_id"},
+        "right": {"schema": "mdp_staging", "table": "dm_t_lines", "column": "head_id"},
+    }
+    attrs = [_attr("head_id", "head_id", pk=True), _attr("qty", "qty", table="dm_t_lines", dtype="integer")]
+    blocked = client.post("/data-models/type-b/validate-mapping", headers=auth_headers, json=_mt_model("mt3b", attrs, [join_lines]))
+    assert blocked.status_code == 422
+    assert "fan out" in str(blocked.json()["detail"])
+
+    allowed = client.post(
+        "/data-models/type-b/preview", headers=auth_headers,
+        json=_mt_model("mt3a", attrs, [{**join_lines, "allow_fanout": True}]),
+    )
+    assert allowed.status_code == 200, allowed.json()
+    assert allowed.json()["count"] == 3  # h1 x2 lines + h2 x1
+    assert any(w["field"].startswith("relationships") for w in allowed.json()["warnings"])
+
+
+def test_mt4_orphan_table_rejected(client: TestClient, auth_headers: dict[str, str], db_session: Session) -> None:
+    seed_mt_tables(db_session)
+    attrs = [_attr("head_id", "head_id", pk=True), _attr("lookup_name", "lookup_name", table="dm_t_lookup")]
+    r = client.post("/data-models/type-b/validate-mapping", headers=auth_headers, json=_mt_model("mt4", attrs, []))
+    assert r.status_code == 422
+    assert "not joined to the base" in str(r.json()["detail"])
+
+
+def test_mt5_join_type_mismatch_rejected(client: TestClient, auth_headers: dict[str, str], db_session: Session) -> None:
+    seed_mt_tables(db_session)
+    bad_join = {
+        "type": "left",
+        "left": {"table": "dm_t_head", "column": "lookup_code"},      # text
+        "right": {"schema": "mdp_staging", "table": "dm_t_lookup", "column": "ref_num"},  # integer
+    }
+    attrs = [_attr("head_id", "head_id", pk=True), _attr("lookup_name", "lookup_name", table="dm_t_lookup")]
+    r = client.post("/data-models/type-b/validate-mapping", headers=auth_headers, json=_mt_model("mt5", attrs, [bad_join]))
+    assert r.status_code == 422
+    assert "type mismatch" in str(r.json()["detail"])
+
+
+def test_mt6_non_unique_primary_key_rejected(client: TestClient, auth_headers: dict[str, str], db_session: Session) -> None:
+    seed_mt_tables(db_session)
+    # base = dm_t_lines, PK head_id repeats → not unique
+    attrs = [_attr("head_id", "head_id", table="dm_t_lines", pk=True), _attr("qty", "qty", table="dm_t_lines", dtype="integer")]
+    r = client.post("/data-models/type-b/validate-mapping", headers=auth_headers, json=_mt_model("mt6", attrs, []))
+    assert r.status_code == 422
+    assert "not unique" in str(r.json()["detail"])
+
+
+def test_mt7_single_table_non_regression(client: TestClient, auth_headers: dict[str, str], db_session: Session) -> None:
+    seed_mt_tables(db_session)
+    attrs = [_attr("head_id", "head_id", pk=True), _attr("title", "title")]
+    r = client.post("/data-models/type-b/preview", headers=auth_headers, json=_mt_model("mt7", attrs, []))
+    assert r.status_code == 200, r.json()
+    assert r.json()["count"] == 2
+
+
+def test_mt8_injection_in_join_rejected(client: TestClient, auth_headers: dict[str, str], db_session: Session) -> None:
+    seed_mt_tables(db_session)
+    evil = {
+        "type": "left",
+        "left": {"table": "dm_t_head", "column": "lookup_code"},
+        "right": {"schema": "mdp_staging", "table": "dm_t_lookup", "column": "lookup_code; drop table dm_t_head"},
+    }
+    attrs = [_attr("head_id", "head_id", pk=True), _attr("lookup_name", "lookup_name", table="dm_t_lookup")]
+    r = client.post("/data-models/type-b/validate-mapping", headers=auth_headers, json=_mt_model("mt8", attrs, [evil]))
+    assert r.status_code == 422
+    # the injection never executed — the table is intact
+    assert db_session.execute(text("SELECT count(*) FROM dm_t_head")).scalar() == 2
