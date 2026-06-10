@@ -236,19 +236,18 @@ def run_cycle(db: Session, cfg: StreamingConfig, *, force: bool = False) -> dict
     if pk and cfg.primary_key_columns != pk:
         cfg.primary_key_columns = pk
 
-    # ---- Case B: no watermark column (or PK cleared) → FULL-RELOAD + atomic swap ----
-    if not ts_col:
+    # ---- Case B: NO watermark column OR NO primary key → FULL-RELOAD + atomic swap ----
+    # (no ts_col = nothing to increment on; no PK = can't upsert → both fall to a full re-copy.)
+    if not ts_col or not pk:
         res = ora2pg_runner.full_reload_once(table, pk_columns=pk)
+        why = "no watermark column" if not ts_col else "no primary key (cleared)"
         return _finish(
             db, cfg, table, ok=bool(res.get("ok")),
             status=("ok" if res.get("ok") else "error"), error=res.get("error"),
-            rows_added=res.get("rows_added"), predicate="(full reload — atomic swap)", extra=res,
+            rows_added=res.get("rows_added"), predicate=f"(full reload — atomic swap; {why})", extra=res,
         )
 
-    # ---- Case A: incremental (date OR sequence) — needs a PK for ON CONFLICT upsert ----
-    if not pk:
-        return _finish(db, cfg, table, ok=False, status="error",
-                       error="no primary_key_columns (run Scan PK / set it on the dashboard — ON CONFLICT needs a unique key). Clear PK to fall back to full-reload.")
+    # ---- Case A: incremental (date OR sequence) — has both a watermark column AND a PK ----
     if not ora2pg_runner.target_exists(table.target_table):
         return _finish(db, cfg, table, ok=False, status="error",
                        error="target table missing — run an initial full load before streaming")
@@ -259,7 +258,7 @@ def run_cycle(db: Session, cfg: StreamingConfig, *, force: bool = False) -> dict
 
     # Initialise the cursor from the loaded baseline (only rows newer than what's loaded stream in).
     if cfg.last_watermark is None:
-        d0, t0 = ora2pg_runner.target_max_watermark(table.target_table, ts_col, time_col)
+        d0, t0 = ora2pg_runner.target_max_watermark(table.target_table, ts_col, time_col, numeric=sequence)
         cfg.last_watermark = d0 if d0 is not None else "0"
         cfg.last_watermark_time = t0 if not sequence else None
 
@@ -273,7 +272,7 @@ def run_cycle(db: Session, cfg: StreamingConfig, *, force: bool = False) -> dict
     res = ora2pg_runner.streaming_pull_once(table, where_clause=predicate, pk_columns=pk)
 
     if res.get("ok"):
-        d2, t2 = ora2pg_runner.target_max_watermark(table.target_table, ts_col, time_col)
+        d2, t2 = ora2pg_runner.target_max_watermark(table.target_table, ts_col, time_col, numeric=sequence)
         if d2 is not None:
             cfg.last_watermark = d2
             if gran == "timestamp" and not sequence:
@@ -333,11 +332,10 @@ FULL_RELOAD_DEFAULT_INTERVAL = 86400  # 24h
 
 
 def is_full_reload(cfg: StreamingConfig) -> bool:
-    """A table streams in full-reload mode when it has NO watermark column configured (and the
-    catalog gives no default ts_col)."""
-    table = get_table(cfg.source_view)
-    ts_col = cfg.ts_col or (_default_ts_col(table) if table else None)
-    return not ts_col
+    """A table streams in full-reload mode when its SAVED ts_col is empty (authoritative — same rule
+    as run_cycle / config_view; NO catalog-hint fallback, else the 12h floor would be bypassed for
+    the hint tables F0911/F0411/F4311)."""
+    return not ((cfg.ts_col or "").strip() or None)
 
 
 def effective_interval(cfg: StreamingConfig) -> int:

@@ -23,6 +23,11 @@ router = APIRouter(
 )
 
 
+import re
+
+_TS_COL_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")  # watermark column → identifier-safe (DDL/predicate injection)
+
+
 class StreamingConfigUpdate(BaseModel):
     enabled: bool | None = None
     ts_col: str | None = None  # "" → clear (full-reload mode)
@@ -64,21 +69,36 @@ def put_config(
     if "ts_kind" in fields and fields["ts_kind"] not in ("date", "sequence"):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="ts_kind must be date|sequence")
 
-    # Case-B (full-reload) interval floor: a table with no watermark column copies the WHOLE view
-    # every cycle, so clamp poll_interval_sec to the 12h hard floor (BE enforce; UI also sets min).
     cfg_existing = streaming_service.get_config(db, table.table)
     new_ts_col = (
         (fields["ts_col"] or "").strip() if "ts_col" in fields
         else ((cfg_existing.ts_col or "").strip() if cfg_existing else "")
     )
-    if not new_ts_col and "poll_interval_sec" in fields:
-        if int(fields["poll_interval_sec"]) < streaming_service.FULL_RELOAD_MIN_INTERVAL:
-            fields["poll_interval_sec"] = streaming_service.FULL_RELOAD_MIN_INTERVAL
+
+    # Validate a chosen watermark column: identifier-safe (it is interpolated into the ora2pg WHERE)
+    # AND, when the view can be probed, a real column of the view.
+    if "ts_col" in fields and new_ts_col:
+        if not _TS_COL_RE.fullmatch(new_ts_col):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="ts_col must be a column name (letters/digits/underscore)")
+        cols, _err = streaming_service.probe_view_columns(table)
+        if cols and new_ts_col.upper() not in {c.upper() for c in cols}:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"ts_col '{new_ts_col}' not found in view {table.table} (columns probed: {len(cols)})",
+            )
+
+    # Case-B (full-reload) interval floor: a table with no watermark column copies the WHOLE view
+    # every cycle → clamp poll_interval_sec to the 12h hard floor whenever the EFFECTIVE mode is full,
+    # even if this request doesn't send poll_interval_sec (e.g. it only clears ts_col).
+    if not new_ts_col:
+        floor = streaming_service.FULL_RELOAD_MIN_INTERVAL
+        current = int(fields.get("poll_interval_sec", cfg_existing.poll_interval_sec if cfg_existing else 0) or 0)
+        if current < floor:
+            fields["poll_interval_sec"] = floor
 
     # timestamp granularity needs a real time-of-day column — require it to be configured (in this
     # request or already saved) AND confirmed present in the view.
     if fields.get("granularity") == "timestamp":
-        cfg_existing = streaming_service.get_config(db, table.table)
         ts_time = fields.get("ts_time_col") or (cfg_existing.ts_time_col if cfg_existing else None)
         if not ts_time:
             raise HTTPException(

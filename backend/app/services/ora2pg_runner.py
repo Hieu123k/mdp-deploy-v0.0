@@ -699,12 +699,16 @@ def target_exists(target_table: str) -> bool:
 
 
 def target_max_watermark(
-    target_table: str, ts_col: str, ts_time_col: str | None = None
+    target_table: str, ts_col: str, ts_time_col: str | None = None, *, numeric: bool = False
 ) -> tuple[str | None, str | None]:
     """Return (max ``ts_col``, paired ``ts_time_col``) currently in the target staging table as
     strings. Used to (a) initialise the streaming cursor from the loaded baseline and (b) advance
     it after each pull. Returns (None, None) when the table is empty/unavailable. Column names are
-    catalog/discovery values (never user input)."""
+    catalog/discovery values (never user input).
+
+    ``numeric=True`` (sequence ids): the target columns are TEXT (MODIFY_TYPE *:text), so a plain
+    MAX is LEXICOGRAPHIC ("99" > "200000") → the cursor would stall. Cast to numeric so MAX is
+    arithmetic. (Julian CYYDDD is fixed-width 6 digits, so text-MAX already matches numeric there.)"""
     schema = settings.ora2pg_target_schema
     tcol = ts_col.lower()
     try:
@@ -721,11 +725,18 @@ def target_max_watermark(
                     if not row or row[0] is None:
                         return None, None
                     return str(row[0]), (None if row[1] is None else str(row[1]))
-                cur.execute(f'SELECT MAX("{tcol}") FROM "{schema}"."{target_table}"')
+                expr = (
+                    f'MAX(NULLIF("{tcol}", \'\')::numeric)' if numeric else f'MAX("{tcol}")'
+                )
+                cur.execute(f'SELECT {expr} FROM "{schema}"."{target_table}"')
                 row = cur.fetchone()
                 if not row or row[0] is None:
                     return None, None
-                return str(row[0]), None
+                # numeric → drop any trailing .0 so the cursor stays an integer-looking string
+                val = row[0]
+                if numeric:
+                    val = int(val) if val == int(val) else val
+                return str(val), None
     except Exception:
         return None, None
 
@@ -829,10 +840,13 @@ def _atomic_swap(schema: str, target: str, new_target: str, old_target: str, pk_
         if present:
             conn.exec_driver_sql(f'ALTER TABLE "{schema}"."{target}" RENAME TO "{old_target}"')
         conn.exec_driver_sql(f'ALTER TABLE "{schema}"."{new_target}" RENAME TO "{target}"')
-        if pk_columns:
-            conn.exec_driver_sql(f'ALTER INDEX IF EXISTS "{schema}"."{new_idx}" RENAME TO "{canon_idx}"')
+        # DROP _old BEFORE renaming the new index → frees the canonical index name ux_<target>_pk
+        # (Postgres keeps the old table's index name on rename; index+table share a namespace, so
+        # renaming into it while _old still exists would collide). Still atomic (one txn).
         if present:
             conn.exec_driver_sql(f'DROP TABLE "{schema}"."{old_target}"')
+        if pk_columns:
+            conn.exec_driver_sql(f'ALTER INDEX IF EXISTS "{schema}"."{new_idx}" RENAME TO "{canon_idx}"')
 
 
 def full_reload_once(table: Ora2pgTable, *, pk_columns: list[str] | None = None) -> dict[str, Any]:
@@ -854,6 +868,7 @@ def full_reload_once(table: Ora2pgTable, *, pk_columns: list[str] | None = None)
     try:
         result["rows_before"] = _count_target(target)  # None if first load (target absent)
         _drop_table(schema, new_target)  # clean any leftover temp from a prior crash
+        _drop_table(schema, old_target)  # …and any stale _old left by a crashed swap
 
         conf = build_ora2pg_conf(table, truncate=True, replace_target=new_target)
         backend_dir, container_dir = _write_conf(conf, run_id)
@@ -898,6 +913,18 @@ def full_reload_once(table: Ora2pgTable, *, pk_columns: list[str] | None = None)
         if err or exit_code not in (0, None):
             _drop_table(schema, new_target)  # live target untouched
             result["error"] = err or f"ora2pg full COPY failed (exit {exit_code})"
+            result["log"] = log_tail[-40:]
+            return result
+
+        # 2b) NON-EMPTY GUARD: never publish an empty table over good data. A transient empty source
+        # (ora2pg can exit 0 with 0 rows) must NOT wipe the live target — refuse the swap, keep old.
+        new_count = _count_target(new_target)
+        if (result["rows_before"] or 0) > 0 and (new_count or 0) == 0:
+            _drop_table(schema, new_target)
+            result["error"] = (
+                f"refused full-reload swap: new copy is EMPTY ({new_count}) but live target has "
+                f"{result['rows_before']} rows — keeping the live data (source likely transiently empty)"
+            )
             result["log"] = log_tail[-40:]
             return result
 
