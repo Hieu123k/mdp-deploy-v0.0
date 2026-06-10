@@ -47,6 +47,9 @@ def update_permissions(
     db: Annotated[Session, Depends(get_db)],
     _admin: Annotated[User, Depends(require_admin)],
 ) -> dict[str, Any]:
+    # Phase 1 — validate the ENTIRE payload BEFORE mutating anything (atomic: a single bad cell
+    # rejects the whole request, never a silent partial apply).
+    writes: list[tuple[str, str, bool]] = []
     for role, keys in payload.roles.items():
         if role == "admin":
             continue  # implicit-full + self-lock protection — admin row is never written
@@ -60,5 +63,10 @@ def update_permissions(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=f"'{key}' is admin-only and cannot be granted to role '{role}'",
                 )
-            set_role_permission(db, role, key, allowed)
+            writes.append((role, key, allowed))
+
+    # Phase 2 — apply all in one transaction (commit once).
+    for role, key, allowed in writes:
+        set_role_permission(db, role, key, allowed, commit=False)
+    db.commit()
     return get_permission_matrix(db)

@@ -649,7 +649,7 @@ def list_keys(db: Annotated[Session, Depends(get_db)]) -> dict[str, Any]:
 @router.post("/discover-keys")
 def discover_keys(
     db: Annotated[Session, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_admin)],
+    current_user: Annotated[User, Depends(require_permission("pk.edit"))],  # consistent with set_primary_key
     table: str | None = None,
 ) -> dict[str, Any]:
     """Discover PK(s) from the Oracle unique index and persist onto MigrationJob.primary_key_columns

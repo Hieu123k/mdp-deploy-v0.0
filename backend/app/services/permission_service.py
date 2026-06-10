@@ -104,8 +104,9 @@ def seed_role_permissions(db: Session) -> int:
     return created
 
 
-def set_role_permission(db: Session, role: str, permission_key: str, allowed: bool) -> None:
-    """Upsert one grant. Anti-escalation (admin-only keys, admin self-lock) is enforced by the API."""
+def set_role_permission(db: Session, role: str, permission_key: str, allowed: bool, *, commit: bool = True) -> None:
+    """Upsert one grant. Anti-escalation (admin-only keys, admin self-lock) is enforced by the API.
+    Pass ``commit=False`` to batch several writes into one atomic transaction (the caller commits)."""
     row = db.scalar(
         select(RolePermission).where(
             RolePermission.role == role,
@@ -116,4 +117,5 @@ def set_role_permission(db: Session, role: str, permission_key: str, allowed: bo
         db.add(RolePermission(role=role, permission_key=permission_key, allowed=allowed))
     else:
         row.allowed = allowed
-    db.commit()
+    if commit:
+        db.commit()

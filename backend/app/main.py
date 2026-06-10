@@ -1,3 +1,4 @@
+import logging
 from contextlib import asynccontextmanager
 from collections.abc import AsyncGenerator
 
@@ -29,6 +30,8 @@ from app.services.source_count_refresher import SourceCountRefresher
 from app.services.streaming_refresher import StreamingRefresher
 from app.services.user_service import seed_default_admin
 
+logger = logging.getLogger("app.startup")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
@@ -39,13 +42,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
             seed_reference_primary_keys(db)  # idempotent; never overrides a manual PK
         except Exception:  # pragma: no cover - never block startup on the PK seed
-            pass
+            logger.exception("PK reference seed failed at startup (continuing)")
         try:
             from app.services.permission_service import seed_role_permissions
 
             seed_role_permissions(db)  # idempotent; never overrides an admin-edited grant
         except Exception:  # pragma: no cover - never block startup on the RBAC seed
-            pass
+            logger.exception("RBAC role-permission seed failed at startup (continuing)")
     refresher = SourceCountRefresher()
     try:
         refresher.start()  # no-op unless ORA2PG_SOURCE_COUNT_ENABLED
