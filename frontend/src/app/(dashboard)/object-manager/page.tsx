@@ -252,6 +252,28 @@ function typeBSource(model: DataModel | FormState): { source_schema: string; sou
   };
 }
 
+// H (prompt 44): the ticked "Source tables" set, derived from a loaded model on edit - every distinct
+// (schema, table) used by an attribute or a join's right side, plus the base table.
+function selectedTablesFromModel(model: DataModel): { schema: string; table: string }[] {
+  const out = new Map<string, { schema: string; table: string }>();
+  const add = (schema?: string | null, table?: string | null) => {
+    if (schema && table) out.set(`${schema}.${table}`, { schema, table });
+  };
+  const base = typeBSource(model);
+  add(base.source_schema, base.source_table);
+  for (const attribute of model.attributes || []) add(attribute.source_schema, attribute.source_table);
+  for (const join of model.relationships || []) add(join.right?.schema, join.right?.table);
+  // Defensive: a join's LEFT table is normally the base or a prior join's right (already added), but
+  // include any not-yet-covered left table (schema unknown -> assume base schema) so buildPayload's
+  // reachable() filter can never silently drop a join when the model is edited.
+  const values = Array.from(out.values());
+  for (const join of model.relationships || []) {
+    const lt = join.left?.table;
+    if (lt && !values.some((t) => t.table === lt)) add(base.source_schema, lt);
+  }
+  return Array.from(out.values());
+}
+
 function previewRows(preview: ModelPreview | null): Record<string, unknown>[] {
   return preview?.data || preview?.records || [];
 }
@@ -446,12 +468,17 @@ export default function DataModelsPage() {
   const [templateLoading, setTemplateLoading] = useState(false);
 
   const [schemas, setSchemas] = useState<string[]>([]);
+  // H (prompt 44): table selection is consolidated into ONE multi-select. `selectedTables` is the set
+  // of ticked tables (each remembers its schema, ticked across schemas); the BASE table (sourceSchema/
+  // sourceTable) is the one marked "Base" (it holds the PK attribute). `browseSchema` is just which
+  // schema's table list the checkbox picker currently shows.
+  const [selectedTables, setSelectedTables] = useState<{ schema: string; table: string }[]>([]);
+  const [browseSchema, setBrowseSchema] = useState("");
   const [sourceSchema, setSourceSchema] = useState("");
-  const [tables, setTables] = useState<DbTable[]>([]);
   const [sourceTable, setSourceTable] = useState("");
   const [columns, setColumns] = useState<DbColumn[]>([]);
-  // Lazy caches so the joins editor and the per-attribute Source table/column dropdowns can list
-  // tables for ANY schema and columns for ANY joined table, not just the base. Keyed `${schema}.${table}`.
+  // Lazy caches so the table checkbox picker, joins editor, and per-attribute Source table/column
+  // dropdowns can list tables/columns for ANY selected table. Keyed `${schema}.${table}`.
   const [tablesBySchema, setTablesBySchema] = useState<Record<string, DbTable[]>>({});
   const [columnsByTable, setColumnsByTable] = useState<Record<string, DbColumn[]>>({});
   const colFetchRef = useRef<Set<string>>(new Set());
@@ -488,19 +515,11 @@ export default function DataModelsPage() {
     listSchemas()
       .then((items) => {
         setSchemas(items);
-        const next = sourceSchema || (items.includes("mdp_staging") ? "mdp_staging" : items[0] || "");
-        if (next) setSourceSchema(next);
+        // Default the checkbox picker's schema only (NOT the base - that is set by ticking a table).
+        setBrowseSchema((cur) => cur || (items.includes("mdp_staging") ? "mdp_staging" : items[0] || ""));
       })
       .catch((error) => setFormErrors(errorMessages(error)));
-  }, [form.type, mode, schemas.length, sourceSchema]);
-
-  useEffect(() => {
-    if (!mode || form.type !== "B" || !sourceSchema) return;
-    setTables([]);
-    listTables(sourceSchema)
-      .then((items) => setTables(items))
-      .catch((error) => setFormErrors(errorMessages(error)));
-  }, [form.type, mode, sourceSchema]);
+  }, [form.type, mode, schemas.length]);
 
   useEffect(() => {
     if (!mode || form.type !== "B" || !sourceSchema || !sourceTable) {
@@ -512,23 +531,22 @@ export default function DataModelsPage() {
       .catch((error) => setFormErrors(errorMessages(error)));
   }, [form.type, mode, sourceSchema, sourceTable]);
 
-  // A joined table's schema is implied: the base table -> base schema; any other table -> the schema
-  // of the join that brings it in (right.schema). Mirrors the backend's schemaForTable.
+  // A table's schema is whatever it was ticked under (selectedTables remembers it); the base table
+  // resolves to the base schema. Used by render + the column lazy-loader + buildPayload.
   const resolveSchemaForTable = useCallback(
     (table: string): string => {
       if (!table || table === sourceTable) return sourceSchema;
-      const join = (form.type === "B" ? form.relationships : []).find((j) => j.right?.table === table);
-      return join?.right?.schema || sourceSchema;
+      return selectedTables.find((t) => t.table === table)?.schema || sourceSchema;
     },
-    [form.relationships, form.type, sourceSchema, sourceTable],
+    [selectedTables, sourceSchema, sourceTable],
   );
 
-  // Lazily fetch the table list for the base schema + every join's right schema (A: right-table dropdown).
+  // Lazily fetch the table list for the schema being browsed + every selected table's schema.
   useEffect(() => {
     if (!mode || form.type !== "B") return;
     const needed = new Set<string>();
-    if (sourceSchema) needed.add(sourceSchema);
-    for (const join of form.relationships) if (join.right?.schema) needed.add(join.right.schema);
+    if (browseSchema) needed.add(browseSchema);
+    for (const t of selectedTables) if (t.schema) needed.add(t.schema);
     needed.forEach((schema) => {
       if (tablesBySchema[schema] || tblFetchRef.current.has(schema)) return;
       tblFetchRef.current.add(schema);
@@ -537,19 +555,13 @@ export default function DataModelsPage() {
         .catch(() => {})
         .finally(() => tblFetchRef.current.delete(schema));
     });
-  }, [mode, form.type, form.relationships, sourceSchema, tablesBySchema]);
+  }, [mode, form.type, browseSchema, selectedTables, tablesBySchema]);
 
-  // Lazily fetch columns for every table referenced by a join (left + right) so the join column
-  // join column dropdowns and the per-attribute Source column dropdown can list them. The base
-  // table's columns already live in `columns`.
+  // Lazily fetch columns for every selected (non-base) table so the join key-column dropdowns and the
+  // per-attribute Source column dropdown can list them. The base table's columns live in `columns`.
   useEffect(() => {
     if (!mode || form.type !== "B") return;
-    const pairs: { schema: string; table: string }[] = [];
-    for (const join of form.relationships) {
-      if (join.right?.schema && join.right?.table) pairs.push({ schema: join.right.schema, table: join.right.table });
-      if (join.left?.table) pairs.push({ schema: resolveSchemaForTable(join.left.table), table: join.left.table });
-    }
-    for (const { schema, table } of pairs) {
+    for (const { schema, table } of selectedTables) {
       if (!schema || !table || table === sourceTable) continue; // base handled by `columns`
       const key = `${schema}.${table}`;
       if (columnsByTable[key] || colFetchRef.current.has(key)) continue;
@@ -559,23 +571,18 @@ export default function DataModelsPage() {
         .catch(() => {})
         .finally(() => colFetchRef.current.delete(key));
     }
-  }, [mode, form.type, form.relationships, sourceTable, resolveSchemaForTable, columnsByTable]);
+  }, [mode, form.type, selectedTables, sourceTable, columnsByTable]);
 
-  // The tables reachable for mapping: base table + every join's right table (deduped, ordered).
+  // The tables joins & attributes may use = exactly the ticked set (deduped).
   const availableTables = useMemo(() => {
-    const list: { schema: string; table: string }[] = [];
-    if (sourceTable) list.push({ schema: sourceSchema, table: sourceTable });
-    for (const join of form.type === "B" ? form.relationships : []) {
-      if (join.right?.table) list.push({ schema: join.right.schema, table: join.right.table });
-    }
     const seen = new Set<string>();
-    return list.filter(({ schema, table }) => {
+    return selectedTables.filter(({ schema, table }) => {
       const key = `${schema}.${table}`;
       if (seen.has(key)) return false;
       seen.add(key);
       return true;
     });
-  }, [sourceSchema, sourceTable, form.relationships, form.type]);
+  }, [selectedTables]);
 
   const columnsFor = useCallback(
     (schema: string, table: string): DbColumn[] => {
@@ -584,6 +591,43 @@ export default function DataModelsPage() {
     },
     [columns, columnsByTable, sourceTable],
   );
+
+  const isTableSelected = useCallback(
+    (schema: string, table: string) => selectedTables.some((t) => t.schema === schema && t.table === table),
+    [selectedTables],
+  );
+
+  // Tick/untick a table. Untick cascades: drop joins that reference it and reset attributes mapped to
+  // it; if it was the base, clear the base. Ticking the first table makes it the base by default.
+  function toggleTable(schema: string, table: string) {
+    if (isTableSelected(schema, table)) {
+      setSelectedTables((cur) => cur.filter((t) => !(t.schema === schema && t.table === table)));
+      setForm((current) => ({
+        ...current,
+        relationships: current.relationships.filter((j) => j.left?.table !== table && j.right?.table !== table),
+        attributes: current.attributes.map((a) =>
+          a.source_table === table
+            ? { ...a, source_schema: undefined, source_table: undefined, source_column: undefined }
+            : a,
+        ),
+      }));
+      if (schema === sourceSchema && table === sourceTable) {
+        setSourceSchema("");
+        setSourceTable("");
+      }
+    } else {
+      setSelectedTables((cur) => [...cur, { schema, table }]);
+      if (!sourceTable) {
+        setSourceSchema(schema);
+        setSourceTable(table);
+      }
+    }
+  }
+
+  function setBaseTable(schema: string, table: string) {
+    setSourceSchema(schema);
+    setSourceTable(table);
+  }
 
   const filteredModels = useMemo(() => {
     const needle = search.trim().toLowerCase();
@@ -672,42 +716,15 @@ export default function DataModelsPage() {
     setForm((current) => ({ ...current, relationships: [...current.relationships, emptyJoin(sourceSchema)] }));
   }
   function updateJoin(index: number, patch: Partial<TypeBJoin>) {
-    setForm((current) => {
-      const oldRight = current.relationships[index]?.right?.table;
-      let relationships = current.relationships.map((join, i) => (i === index ? { ...join, ...patch } : join));
-      const newRight = relationships[index]?.right?.table;
-      // If this join's right table changed (incl. cleared by a schema change), any OTHER join that
-      // used the OLD right table as its left table is now orphaned (that table is no longer reachable)
-      // -> reset its left to the base table so the stale value can't silently persist and break Save.
-      if (oldRight && oldRight !== newRight) {
-        relationships = relationships.map((join, i) =>
-          i !== index && join.left?.table === oldRight ? { ...join, left: { table: "", column: "" } } : join,
-        );
-      }
-      return { ...current, relationships };
-    });
+    // Joins now only reference ticked tables; removing a join doesn't change table reachability
+    // (that is `selectedTables`), so the prompt-43 right/left cascades are no longer needed here.
+    setForm((current) => ({
+      ...current,
+      relationships: current.relationships.map((join, i) => (i === index ? { ...join, ...patch } : join)),
+    }));
   }
   function removeJoin(index: number) {
-    setForm((current) => {
-      const removedTable = current.relationships[index]?.right?.table;
-      const relationships = current.relationships.filter((_, i) => i !== index);
-      // If the removed join was the only one reaching `removedTable`, that table is no longer mappable.
-      // Reset any attribute mapped to it (and any other join's left referencing it) back to the base
-      // table so an orphaned source can't silently persist (blank dropdown) and break Save.
-      const stillReachable = !removedTable || relationships.some((j) => j.right?.table === removedTable);
-      if (!removedTable || stillReachable) return { ...current, relationships };
-      return {
-        ...current,
-        relationships: relationships.map((j) =>
-          j.left?.table === removedTable ? { ...j, left: { table: "", column: "" } } : j,
-        ),
-        attributes: current.attributes.map((a) =>
-          a.source_table === removedTable
-            ? { ...a, source_schema: undefined, source_table: undefined, source_column: undefined }
-            : a,
-        ),
-      };
-    });
+    setForm((current) => ({ ...current, relationships: current.relationships.filter((_, i) => i !== index) }));
   }
 
   function addAttribute() {
@@ -845,17 +862,15 @@ export default function DataModelsPage() {
       primary = attributes.find((attribute) => attribute.is_primary_key)?.name || attributes[0]?.name || "";
     }
     for (const attribute of attributes) attribute.is_primary_key = attribute.name === primary;
-    // Blank "Left table" defaults to the base table (honours the field's placeholder) before filtering.
-    // Safety net for A: a join whose left table is no longer reachable (base, or another join's right
-    // table) is dropped rather than sent - so an orphaned/stale join can't break Save with a cryptic
-    // backend error. (updateJoin already cascade-clears most of these to the base table.)
-    const rightTables = new Set(form.relationships.map((join) => join.right?.table).filter(Boolean));
-    const reachableLeft = (table: string) => !table || table === sourceTable || rightTables.has(table);
+    // Blank "Left table" defaults to the base table before filtering. Safety net: a join referencing a
+    // table outside the ticked set is dropped rather than sent (the dropdowns already constrain this).
+    const selectedNames = new Set(selectedTables.map((t) => t.table));
+    const reachable = (table: string) => !table || table === sourceTable || selectedNames.has(table);
     const relationships =
       form.type === "B"
         ? form.relationships
             .map((join) => ({ ...join, left: { ...join.left, table: join.left.table || sourceTable } }))
-            .filter((join) => isCompleteJoin(join) && reachableLeft(join.left.table))
+            .filter((join) => isCompleteJoin(join) && reachable(join.left.table) && reachable(join.right.table))
         : null;
     return {
       relationships: relationships && relationships.length ? relationships : null,
@@ -902,11 +917,9 @@ export default function DataModelsPage() {
       if (first === undefined) seenNames.set(attribute.name, index);
       else errors.push({ field: `attributes[${index}].name`, message: `Duplicate attribute name "${attribute.name}".` });
     });
-    // A Type B attribute can only map to the base table or a joined table. Flag an orphaned source
-    // (e.g. its join was removed) on the FE instead of letting the backend reject it cryptically.
-    const reachableTables = new Set<string>(
-      [sourceTable, ...(payload.relationships || []).map((join) => join.right?.table)].filter(Boolean) as string[],
-    );
+    // I (prompt 44): a Type B attribute can only map to a ticked table; the PK attribute must map to
+    // the base table. Flag both on the FE instead of letting the backend reject cryptically.
+    const selectedNames = new Set<string>(selectedTables.map((t) => t.table));
     payload.attributes.forEach((attribute, index) => {
       if (!/^[a-z][a-z0-9_]*$/.test(attribute.name)) {
         errors.push({ field: `attributes[${index}].name`, message: "Attribute name must be lowercase snake_case." });
@@ -916,10 +929,22 @@ export default function DataModelsPage() {
       }
       if (payload.type === "B" && (!attribute.source_schema || !attribute.source_table || !attribute.source_column)) {
         errors.push({ field: `attributes[${index}].source_column`, message: "Type B attributes require source mapping." });
-      } else if (payload.type === "B" && attribute.source_table && !reachableTables.has(attribute.source_table)) {
+      } else if (payload.type === "B" && attribute.source_table && !selectedNames.has(attribute.source_table)) {
         errors.push({
           field: `attributes[${index}].source_table`,
-          message: `Source table "${attribute.source_table}" is not the base table or a joined table. Add a join or pick another source.`,
+          message: `Source table "${attribute.source_table}" is not in the selected tables. Tick it above or pick another source.`,
+        });
+      }
+      if (
+        payload.type === "B" &&
+        attribute.name === payload.primary_key &&
+        attribute.source_table &&
+        sourceTable &&
+        attribute.source_table !== sourceTable
+      ) {
+        errors.push({
+          field: `attributes[${index}].source_table`,
+          message: "The primary key attribute must map to the Base table.",
         });
       }
     });
@@ -991,19 +1016,21 @@ export default function DataModelsPage() {
     const next = initialForm();
     setForm(next);
     setMode("create");
+    setSelectedTables([]);
+    setSourceSchema("");
+    setSourceTable("");
+    setColumns([]);
     if (!schemas.length) {
       try {
         const items = await listSchemas();
         setSchemas(items);
-        setSourceSchema(items.includes("mdp_staging") ? "mdp_staging" : items[0] || "");
+        setBrowseSchema(items.includes("mdp_staging") ? "mdp_staging" : items[0] || "");
       } catch (error) {
         setFormErrors(errorMessages(error));
       }
     } else {
-      setSourceSchema(schemas.includes("mdp_staging") ? "mdp_staging" : schemas[0] || "");
+      setBrowseSchema(schemas.includes("mdp_staging") ? "mdp_staging" : schemas[0] || "");
     }
-    setSourceTable("");
-    setColumns([]);
   }
 
   async function loadModel(id: string): Promise<DataModel | null> {
@@ -1035,8 +1062,10 @@ export default function DataModelsPage() {
     const next = formFromModel(detail);
     setForm(next);
     const source = typeBSource(detail);
-    setSourceSchema(source.source_schema || (schemas.includes("mdp_staging") ? "mdp_staging" : schemas[0] || ""));
+    setSourceSchema(source.source_schema);
     setSourceTable(source.source_table);
+    setSelectedTables(detail.type === "B" ? selectedTablesFromModel(detail) : []);
+    setBrowseSchema(source.source_schema || (schemas.includes("mdp_staging") ? "mdp_staging" : schemas[0] || ""));
   }
 
   async function openPreview(model: DataModel) {
@@ -1639,9 +1668,10 @@ export default function DataModelsPage() {
 
         <DrawerSection title="Basic Information">
           <div className="grid gap-3 md:grid-cols-2">
-            <Input label="Display name" value={form.display_name} onChange={(event) => patchForm({ display_name: event.target.value })} />
+            <Input label="Display name" placeholder="Human-readable name" value={form.display_name} onChange={(event) => patchForm({ display_name: event.target.value })} />
             <Input
               label="Name"
+              placeholder="lowercase_snake_case"
               value={form.name}
               disabled={mode === "edit"}
               onChange={(event) => patchForm({ name: snake(event.target.value) })}
@@ -1651,8 +1681,9 @@ export default function DataModelsPage() {
               <span className="mb-1.5 block text-sm font-medium text-neutral-700">Description</span>
               <textarea
                 value={form.description}
+                placeholder="What this model represents"
                 onChange={(event) => patchForm({ description: event.target.value })}
-                className="min-h-20 w-full rounded-md border border-neutral-300 px-3 py-2 text-sm focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/30"
+                className="min-h-20 w-full rounded-md border border-neutral-300 px-3 py-2 text-sm placeholder:text-neutral-400 focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/30"
               />
             </label>
           </div>
@@ -1667,12 +1698,12 @@ export default function DataModelsPage() {
               <option value="">-</option>
               {DOMAINS.map((item) => <option key={item} value={item}>{titleize(item)}</option>)}
             </Select>
-            <Input label="Entity type" value={form.entity_type} onChange={(event) => patchForm({ entity_type: snake(event.target.value) })} />
+            <Input label="Entity type" placeholder="e.g. supplier" value={form.entity_type} onChange={(event) => patchForm({ entity_type: snake(event.target.value) })} />
             <Select label="Business process" value={form.business_process} onChange={(event) => patchForm({ business_process: event.target.value })}>
               <option value="">-</option>
               {BUSINESS_PROCESSES.map((item) => <option key={item} value={item}>{titleize(item)}</option>)}
             </Select>
-            <Input className="font-mono" label="Namespace" value={form.namespace} onChange={(event) => patchForm({ namespace: event.target.value })} />
+            <Input className="font-mono" label="Namespace" placeholder="avenue.domain.entity" value={form.namespace} onChange={(event) => patchForm({ namespace: event.target.value })} />
             <Select label="Source layer" value={form.source_layer} onChange={(event) => patchForm({ source_layer: event.target.value })}>
               <option value="">Infer automatically</option>
               {SOURCE_LAYERS.map((item) => <option key={item} value={item}>{titleize(item)}</option>)}
@@ -1744,19 +1775,78 @@ export default function DataModelsPage() {
         title="Type B Source & Mapping"
         subtitle="Source columns are mapped to data model attributes. Attribute names may differ from source column names."
       >
-        <div className="mb-3 grid gap-3 md:grid-cols-2">
-          <Select label="Source schema" value={sourceSchema} onChange={(event) => { setSourceSchema(event.target.value); setSourceTable(""); }}>
-            <option value="">- schema -</option>
-            {schemas.map((schema) => <option key={schema} value={schema}>{schema}</option>)}
-          </Select>
-          <Select label="Source table / view" value={sourceTable} onChange={(event) => setSourceTable(event.target.value)}>
-            <option value="">- table or view -</option>
-            {tables.map((table) => (
-              <option key={table.table_name} value={table.table_name}>
-                {table.table_name} - {table.table_type}
-              </option>
-            ))}
-          </Select>
+        {/* H: one place to choose every table this model reads from. Tick across schemas; mark one Base. */}
+        <div className="mb-3 rounded-md border border-neutral-200 p-3">
+          <div className="mb-2">
+            <h4 className="text-sm font-semibold text-neutral-700">Source tables</h4>
+            <p className="text-xs text-neutral-500">
+              Tick every table this model reads from (you can tick across schemas). Mark one as
+              <span className="font-medium"> Base</span> (the table that holds the primary key).
+            </p>
+          </div>
+          <div className="grid gap-3 md:grid-cols-2">
+            <div>
+              <Select
+                label="Schema"
+                value={browseSchema}
+                onChange={(event) => setBrowseSchema(event.target.value)}
+                className={browseSchema ? "" : "text-neutral-400"}
+              >
+                <option value="" disabled>- Select schema -</option>
+                {schemas.map((schema) => <option key={schema} value={schema}>{schema}</option>)}
+              </Select>
+              <div className="mt-2 max-h-44 overflow-y-auto rounded border border-neutral-100 p-2">
+                {(tablesBySchema[browseSchema] || []).length === 0 ? (
+                  <p className="text-xs text-neutral-400">No tables in this schema.</p>
+                ) : (
+                  (tablesBySchema[browseSchema] || []).map((t) => (
+                    <label key={t.table_name} className="flex items-center gap-2 py-0.5 font-mono text-[11px] text-neutral-700">
+                      <input
+                        type="checkbox"
+                        aria-label={`Select ${browseSchema}.${t.table_name}`}
+                        checked={isTableSelected(browseSchema, t.table_name)}
+                        onChange={() => toggleTable(browseSchema, t.table_name)}
+                      />
+                      {t.table_name} <span className="text-neutral-400">{t.table_type}</span>
+                    </label>
+                  ))
+                )}
+              </div>
+            </div>
+            <div>
+              <span className="mb-1.5 block text-sm font-medium text-neutral-700">Selected tables</span>
+              <div className="min-h-[44px] rounded border border-neutral-100 p-2">
+                {selectedTables.length === 0 ? (
+                  <p className="text-xs text-neutral-400">Tick tables on the left to add them.</p>
+                ) : (
+                  selectedTables.map((st) => (
+                    <div key={`${st.schema}.${st.table}`} className="flex items-center gap-2 py-0.5 font-mono text-[11px]">
+                      <label className="flex items-center gap-1 text-neutral-700">
+                        <input
+                          type="radio"
+                          name="base_table"
+                          aria-label={`Base ${st.schema}.${st.table}`}
+                          checked={st.schema === sourceSchema && st.table === sourceTable}
+                          onChange={() => setBaseTable(st.schema, st.table)}
+                        />
+                        Base
+                      </label>
+                      <span className="text-neutral-800">{st.schema}.{st.table}</span>
+                      <button
+                        type="button"
+                        title="Remove table"
+                        aria-label={`Remove ${st.schema}.${st.table}`}
+                        onClick={() => toggleTable(st.schema, st.table)}
+                        className="ml-auto rounded px-1 text-danger hover:bg-danger/10"
+                      >
+                        remove
+                      </button>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          </div>
         </div>
         <div className="mb-3 flex flex-wrap items-center gap-2">
           <Button size="sm" variant="secondary" onClick={generateAttributes} disabled={!columns.length}>
@@ -1778,8 +1868,8 @@ export default function DataModelsPage() {
           <div>
             <h4 className="text-sm font-semibold text-neutral-700">Relationships / Joins (multi-table)</h4>
             <p className="text-xs text-neutral-500">
-              The base table is the primary-key attribute&apos;s table. Add a join to pull columns from
-              another table. The <code>Joined key column</code> must be unique (N:1) unless fan-out is allowed.
+              Join the ticked tables. The <code>Right key column</code> must be unique (N:1) unless
+              fan-out is allowed.
             </p>
           </div>
           <Button size="sm" variant="secondary" onClick={addJoin}>Add Join</Button>
@@ -1789,14 +1879,12 @@ export default function DataModelsPage() {
         ) : (
           <div className="space-y-2">
             {form.relationships.map((join, index) => {
-              const leftTable = join.left.table || sourceTable;
-              const leftColumns = columnsFor(resolveSchemaForTable(leftTable), leftTable);
-              const rightTables = tablesBySchema[join.right.schema] || (join.right.schema === sourceSchema ? tables : []);
+              // Both sides pick from the ticked set only. Left holds a table name (its schema is
+              // resolved from selectedTables); right keeps {schema,table} so it stays unambiguous.
+              const leftColumns = columnsFor(resolveSchemaForTable(join.left.table), join.left.table);
               const rightColumns = columnsFor(join.right.schema, join.right.table);
-              // Left table can be the base table or any OTHER join's right table (not this join's own).
-              const leftTableOptions = availableTables.filter(
-                (t) => !(t.schema === join.right.schema && t.table === join.right.table),
-              );
+              const tableLabel = (t: { schema: string; table: string }) =>
+                t.schema && t.schema !== sourceSchema ? `${t.schema}.${t.table}` : t.table;
               return (
                 <div key={index} className="flex flex-wrap items-end gap-2 rounded border border-neutral-100 p-2">
                   <Select
@@ -1809,54 +1897,48 @@ export default function DataModelsPage() {
                     <option value="inner">inner</option>
                   </Select>
                   <Select
-                    label="Base table"
+                    label="Left table"
                     value={join.left.table}
                     onChange={(event) => updateJoin(index, { left: { table: event.target.value, column: "" } })}
-                    className="h-8 min-w-[180px] font-mono text-[11px]"
+                    className={cn("h-8 min-w-[180px] font-mono text-[11px]", join.left.table ? "" : "text-neutral-400")}
                   >
-                    <option value="">{sourceTable ? `${sourceTable} (base)` : "- base table -"}</option>
-                    {leftTableOptions.map((t) => (
-                      <option key={`${t.schema}.${t.table}`} value={t.table}>{t.table}</option>
+                    <option value="" disabled>- Select table -</option>
+                    {availableTables.map((t) => (
+                      <option key={tableKey(t.schema, t.table)} value={t.table}>{tableLabel(t)}</option>
                     ))}
                   </Select>
                   <Select
-                    label="Base key column"
+                    label="Left key column"
                     value={join.left.column}
                     onChange={(event) => updateJoin(index, { left: { ...join.left, column: event.target.value } })}
-                    className="h-8 min-w-[160px] font-mono text-[11px]"
+                    className={cn("h-8 min-w-[160px] font-mono text-[11px]", join.left.column ? "" : "text-neutral-400")}
                   >
-                    <option value="">- base key column -</option>
+                    <option value="" disabled>- Select column -</option>
                     {leftColumns.map((column) => (
                       <option key={column.column_name} value={column.column_name}>{column.column_name}</option>
                     ))}
                   </Select>
                   <Select
-                    label="Joined schema"
-                    value={join.right.schema}
-                    onChange={(event) => updateJoin(index, { right: { schema: event.target.value, table: "", column: "" } })}
-                    className="h-8 min-w-[150px] font-mono text-[11px]"
+                    label="Right table"
+                    value={tableKey(join.right.schema, join.right.table)}
+                    onChange={(event) => {
+                      const [schema, table] = event.target.value ? event.target.value.split(SRC_SEP) : ["", ""];
+                      updateJoin(index, { right: { schema, table, column: "" } });
+                    }}
+                    className={cn("h-8 min-w-[180px] font-mono text-[11px]", join.right.table ? "" : "text-neutral-400")}
                   >
-                    <option value="">- schema -</option>
-                    {schemas.map((schema) => <option key={schema} value={schema}>{schema}</option>)}
-                  </Select>
-                  <Select
-                    label="Joined table"
-                    value={join.right.table}
-                    onChange={(event) => updateJoin(index, { right: { ...join.right, table: event.target.value, column: "" } })}
-                    className="h-8 min-w-[180px] font-mono text-[11px]"
-                  >
-                    <option value="">- joined table -</option>
-                    {rightTables.map((table) => (
-                      <option key={table.table_name} value={table.table_name}>{table.table_name}</option>
+                    <option value="" disabled>- Select table -</option>
+                    {availableTables.map((t) => (
+                      <option key={tableKey(t.schema, t.table)} value={tableKey(t.schema, t.table)}>{tableLabel(t)}</option>
                     ))}
                   </Select>
                   <Select
-                    label="Joined key column"
+                    label="Right key column"
                     value={join.right.column}
                     onChange={(event) => updateJoin(index, { right: { ...join.right, column: event.target.value } })}
-                    className="h-8 min-w-[160px] font-mono text-[11px]"
+                    className={cn("h-8 min-w-[160px] font-mono text-[11px]", join.right.column ? "" : "text-neutral-400")}
                   >
-                    <option value="">- joined key column -</option>
+                    <option value="" disabled>- Select column -</option>
                     {rightColumns.map((column) => (
                       <option key={column.column_name} value={column.column_name}>{column.column_name}</option>
                     ))}
@@ -1886,9 +1968,8 @@ export default function DataModelsPage() {
     );
   }
 
-  // F: two cascading dropdowns per attribute - Source table (base + joined tables) then Source column
-  // (columns of THAT table). Picking the column auto-fills data_type + name. Multi-table: the table
-  // list is base + every joined table; columns load per the selected table via db-browser.
+  // I/F: two cascading dropdowns per attribute - Source table (ONLY the ticked tables) then Source
+  // column (columns of THAT table). Picking the column auto-fills data_type + name.
   function renderSourceCell(attribute: DataModelAttribute, index: number) {
     const attrTable = attribute.source_table || sourceTable;
     const attrSchema = attribute.source_table ? attribute.source_schema || resolveSchemaForTable(attrTable) : sourceSchema;
@@ -1902,10 +1983,10 @@ export default function DataModelsPage() {
           aria-label="Source table"
           value={curTableKey}
           onChange={(event) => selectAttributeTable(index, event.target.value)}
-          className="h-7 w-full font-mono text-[11px]"
+          className={cn("h-7 w-full font-mono text-[11px]", curTableKey ? "" : "text-neutral-400")}
         >
-          <option value="">- source table -</option>
-          {/* Keep an orphaned mapping visible (e.g. its join was removed) instead of a blank select. */}
+          <option value="" disabled>- Select table -</option>
+          {/* Keep an orphaned mapping visible (e.g. its table was un-ticked) instead of a blank select. */}
           {attribute.source_table && !tableKnown && (
             <option value={curTableKey}>{`${attrSchema}.${attrTable} (current)`}</option>
           )}
@@ -1919,9 +2000,9 @@ export default function DataModelsPage() {
           aria-label="Source column"
           value={attribute.source_column || ""}
           onChange={(event) => selectAttributeColumn(index, attrSchema, attrTable, event.target.value)}
-          className="h-7 w-full font-mono text-[11px]"
+          className={cn("h-7 w-full font-mono text-[11px]", attribute.source_column ? "" : "text-neutral-400")}
         >
-          <option value="">- source column -</option>
+          <option value="" disabled>- Select column -</option>
           {/* Keep the saved column selectable even before its table's columns finish loading. */}
           {attribute.source_column && !colKnown && (
             <option value={attribute.source_column}>{`${attribute.source_column} (current)`}</option>
@@ -1968,6 +2049,7 @@ export default function DataModelsPage() {
               <TD>
                 <Input
                   aria-label="Attribute name"
+                  placeholder="attribute_name"
                   value={attribute.name}
                   onChange={(event) => updateAttribute(index, { name: snake(event.target.value) })}
                   className="h-8 font-mono text-xs"
@@ -1976,6 +2058,7 @@ export default function DataModelsPage() {
               <TD>
                 <Input
                   aria-label="Display name"
+                  placeholder="Display name"
                   value={attribute.display_name || ""}
                   onChange={(event) => updateAttribute(index, { display_name: event.target.value })}
                   className="h-8 text-xs"
