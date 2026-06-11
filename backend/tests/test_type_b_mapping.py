@@ -555,3 +555,78 @@ def test_mt10_inner_join_warns(client: TestClient, auth_headers: dict[str, str],
     r = client.post("/data-models/type-b/validate-mapping", headers=auth_headers, json=_mt_model("mt10", attrs, [j]))
     assert r.status_code == 200, r.json()
     assert any("INNER JOIN" in w["message"] for w in r.json()["warnings"])
+
+
+# --- Prompt 42: uuid→text mapping (D) + multi-table uuid join E2E (U5, U6) -----------------------
+
+def seed_uuid_tables(db_session: Session) -> None:
+    """Two joinable fixtures with uuid keys: dm_id_mount (UNIQUE id_mount) ← dm_id_name (id_mount FK).
+    Mirrors the prompt-42 U6 scenario (join dm_id_name → dm_id_mount via id_mount)."""
+    db_session.execute(text("CREATE TABLE IF NOT EXISTS dm_id_mount (id_mount uuid PRIMARY KEY, mount_name text)"))
+    db_session.execute(text("CREATE TABLE IF NOT EXISTS dm_id_name (id_name uuid PRIMARY KEY, id_mount uuid, full_name text)"))
+    db_session.execute(text("DELETE FROM dm_id_mount"))
+    db_session.execute(text("DELETE FROM dm_id_name"))
+    db_session.execute(text(
+        "INSERT INTO dm_id_mount VALUES "
+        "('11111111-1111-1111-1111-111111111111','Mount A'),"
+        "('22222222-2222-2222-2222-222222222222','Mount B')"
+    ))
+    db_session.execute(text(
+        "INSERT INTO dm_id_name VALUES "
+        "('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa','11111111-1111-1111-1111-111111111111','Alice'),"
+        "('bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb','22222222-2222-2222-2222-222222222222','Bob')"
+    ))
+    db_session.commit()
+
+
+def test_u5_uuid_column_maps_to_text(
+    client: TestClient, auth_headers: dict[str, str], db_session: Session
+) -> None:
+    """D: a uuid source column (e.g. surrogate `id`) links as a text attribute — validation no longer
+    fails with 'Unsupported source data type: uuid'."""
+    seed_uuid_tables(db_session)
+    attrs = [
+        _attr("id_mount", "id_mount", table="dm_id_mount", dtype="text", pk=True),
+        _attr("mount_name", "mount_name", table="dm_id_mount", dtype="text"),
+    ]
+    r = client.post(
+        "/data-models/type-b/validate-mapping",
+        headers=auth_headers,
+        json=_mt_model("u5_uuid", attrs, primary_key="id_mount"),
+    )
+    assert r.status_code == 200, r.json()
+    assert r.json()["status"] == "success"
+    assert "id_mount" in {m["attribute"] for m in r.json()["mapped_columns"]}
+
+
+def test_u6_uuid_multitable_join_validate_preview_save(
+    client: TestClient, auth_headers: dict[str, str], db_session: Session
+) -> None:
+    """U6 (backend twin of the dropdown E2E): join dm_id_name → dm_id_mount via id_mount (uuid keys),
+    then Validate → Preview → Save all succeed."""
+    seed_uuid_tables(db_session)
+    join = {
+        "type": "left",
+        "left": {"table": "dm_id_name", "column": "id_mount"},
+        "right": {"schema": "mdp_staging", "table": "dm_id_mount", "column": "id_mount"},
+    }
+    attrs = [
+        _attr("id_name", "id_name", table="dm_id_name", dtype="text", pk=True),
+        _attr("full_name", "full_name", table="dm_id_name", dtype="text"),
+        _attr("mount_name", "mount_name", table="dm_id_mount", dtype="text"),
+    ]
+    payload = _mt_model("u6_id_name", attrs, [join], primary_key="id_name")
+
+    validate = client.post("/data-models/type-b/validate-mapping", headers=auth_headers, json=payload)
+    assert validate.status_code == 200, validate.json()
+    assert validate.json()["status"] == "success"
+
+    preview = client.post("/data-models/type-b/preview", headers=auth_headers, json=payload)
+    assert preview.status_code == 200, preview.json()
+    by_name = {row["full_name"]: row for row in preview.json()["data"]}
+    assert by_name["Alice"]["mount_name"] == "Mount A"
+    assert by_name["Bob"]["mount_name"] == "Mount B"
+
+    save = client.post("/data-models", headers=auth_headers, json=payload)
+    assert save.status_code == 201, save.json()
+    assert save.json()["primary_key"] == "id_name"

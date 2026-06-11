@@ -37,6 +37,7 @@ POSTGRES_TO_PLATFORM_TYPES = {
     "real": "float",
     "decimal": "float",
     "boolean": "boolean",
+    "uuid": "text",  # uuid columns (e.g. surrogate `id`) link as text — no more "Unsupported"
     "date": "date",
     "timestamp": "datetime",
     "timestamp without time zone": "datetime",
