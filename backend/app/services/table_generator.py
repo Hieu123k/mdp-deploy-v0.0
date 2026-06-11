@@ -4,9 +4,14 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
+
 
 SYSTEM_COLUMN_NAMES = {"id", "raw_payload", "created_at", "updated_at"}
 IDENTIFIER_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
+# IANA tz names are letters/digits and a small set of separators (e.g. Asia/Ho_Chi_Minh, Etc/GMT+7).
+# This pre-filter makes injection impossible BEFORE the pg_timezone_names existence check.
+TIMEZONE_NAME_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_+/\-]*$")
 
 DATA_TYPE_TO_POSTGRES = {
     "text": "TEXT",
@@ -42,6 +47,30 @@ def get_generated_table_name(model_name: str) -> str:
 def quote_identifier(identifier: str) -> str:
     validate_identifier(identifier, "Identifier")
     return f'"{identifier}"'
+
+
+def validate_timezone(db: Session, tz: str) -> str:
+    """Validate a timezone name BEFORE it is interpolated into DDL (anti-injection). It must match the
+    safe IANA pattern AND — on postgres — exist in ``pg_timezone_names``. Returns the validated name
+    (safe to embed). A toxic/unknown ``APP_TIMEZONE`` raises ``TableGenerationError`` rather than
+    reaching SQL."""
+    if not tz or not TIMEZONE_NAME_PATTERN.fullmatch(tz):
+        raise TableGenerationError(f"Invalid APP_TIMEZONE (not a timezone name): {tz!r}")
+    if db.bind and db.bind.dialect.name == "postgresql":
+        exists = db.execute(
+            text("SELECT 1 FROM pg_timezone_names WHERE name = :tz"), {"tz": tz}
+        ).scalar()
+        if not exists:
+            raise TableGenerationError(f"Unknown timezone (not in pg_timezone_names): {tz}")
+    return tz
+
+
+def timestamp_default_clause(db: Session, tz: str | None = None) -> str:
+    """DEFAULT expression for dm_* ``created_at``/``updated_at``: VN wall-clock stored in a NAIVE
+    ``TIMESTAMP`` column. Postgres on the VM is UTC, so ``now() AT TIME ZONE '<tz>'`` shifts UTC →
+    the configured local wall-clock. ``tz`` defaults to ``settings.app_timezone``; it is validated."""
+    safe_tz = validate_timezone(db, tz or settings.app_timezone)
+    return f"(now() AT TIME ZONE '{safe_tz}')"
 
 
 def map_data_type_to_postgres(data_type: str) -> str:
@@ -80,6 +109,9 @@ def generated_table_exists(db: Session, model_name: str) -> bool:
 def create_generated_table_for_model(db: Session, model: Any) -> str:
     table_name = get_generated_table_name(model.name)
     validate_generated_column_names(model.attributes)
+    # Validate the timezone up-front (before the dialect branch) so a toxic APP_TIMEZONE is rejected
+    # on every backend, not only postgres.
+    tz_default = timestamp_default_clause(db)
 
     if db.bind and db.bind.dialect.name != "postgresql":
         return table_name
@@ -91,8 +123,9 @@ def create_generated_table_for_model(db: Session, model: Any) -> str:
     columns = [
         '"id" UUID PRIMARY KEY',
         '"raw_payload" JSONB NULL',
-        '"created_at" TIMESTAMP DEFAULT now()',
-        '"updated_at" TIMESTAMP DEFAULT now()',
+        # NAIVE timestamp storing local (VN) wall-clock — Postgres is UTC, the default shifts it.
+        f'"created_at" TIMESTAMP DEFAULT {tz_default}',
+        f'"updated_at" TIMESTAMP DEFAULT {tz_default}',
     ]
     for attribute in model.attributes:
         column_name = quote_identifier(attribute["name"])

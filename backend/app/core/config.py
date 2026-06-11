@@ -7,6 +7,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     app_env: Literal["local", "test", "production"] = "local"
+    # Wall-clock timezone for dm_* business timestamps (created_at/updated_at). Postgres on the VM
+    # runs in UTC, so these naive columns default to `now() AT TIME ZONE app_timezone` to store local
+    # (VN) wall-clock time. Validated against pg_timezone_names before it ever reaches DDL.
+    app_timezone: str = "Asia/Ho_Chi_Minh"
     database_url: str = "postgresql+psycopg://mdp_user:mdp_password@postgres:5432/mdp"
     cors_origins: list[str] = ["http://localhost:3000", "http://127.0.0.1:3000"]
     jwt_secret_key: str = "change_me"
