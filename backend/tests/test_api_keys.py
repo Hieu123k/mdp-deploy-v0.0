@@ -97,7 +97,8 @@ def test_valid_api_key_can_call_outbound(
     response = client.get("/outbound/invoice", headers={"X-API-Key": api_key})
 
     assert response.status_code == 200
-    assert response.json()["count"] == 1
+    assert response.json()["code"] == 0  # envelope (prompt 41)
+    assert response.json()["data"]["count"] == 1
 
 
 def test_inbound_only_key_cannot_call_outbound(

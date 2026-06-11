@@ -49,8 +49,10 @@ def test_inbound_inserts_valid_record_into_generated_table(
         text("SELECT invoice_no, amount FROM mdp_data.dm_invoice")
     ).mappings().one()
 
+    # Envelope (prompt 41): real status 200, code 0, data = the old inbound body.
     assert response.status_code == 200
-    assert response.json()["status"] == "success"
+    assert response.json()["code"] == 0
+    assert response.json()["data"]["status"] == "success"
     assert row["invoice_no"] == "INV-001"
     assert row["amount"] == 98.5
 
@@ -66,7 +68,8 @@ def test_required_field_missing_returns_422(
     response = client.post("/inbound/invoice", headers=auth_headers, json={"amount": 98.5})
 
     assert response.status_code == 422
-    assert response.json()["detail"][0]["field"] == "invoice_no"
+    assert response.json()["code"] == 1005
+    assert response.json()["data"]["errors"][0]["field"] == "invoice_no"
 
 
 def test_invalid_data_type_returns_422(
@@ -84,7 +87,8 @@ def test_invalid_data_type_returns_422(
     )
 
     assert response.status_code == 422
-    assert response.json()["detail"][0]["field"] == "amount"
+    assert response.json()["code"] == 1005
+    assert response.json()["data"]["errors"][0]["field"] == "amount"
 
 
 def test_unknown_field_ignored_for_insert_but_preserved_in_raw_payload(
@@ -138,7 +142,9 @@ def test_type_b_model_inbound_returns_400(
     )
 
     assert response.status_code == 400
-    assert response.json()["detail"] == "Inbound API is only supported for Type A data models"
+    assert response.json()["code"] == 1001
+    assert response.json()["data"] is None
+    assert response.json()["message"] == "Inbound API is only supported for Type A data models"
 
 
 def test_successful_request_writes_success_transaction(

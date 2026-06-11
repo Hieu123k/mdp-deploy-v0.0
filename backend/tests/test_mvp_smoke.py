@@ -228,10 +228,10 @@ def test_smoke_type_b_supplier_flow(
     assert any(row["supplier_code"] == "SUP-1001" for row in preview.json()["data"])
     assert save.status_code == 201
     assert by_key.status_code == 200
-    assert by_key.json()["data"]["supplier_name"] == "ABC Industrial Supplies"
+    assert by_key.json()["data"]["data"]["supplier_name"] == "ABC Industrial Supplies"
     assert filtered.status_code == 200
-    assert any(row["supplier_code"] == "SUP-1001" for row in filtered.json()["data"])
-    assert {row["country"] for row in filtered.json()["data"]} == {"VN"}
+    assert any(row["supplier_code"] == "SUP-1001" for row in filtered.json()["data"]["data"])
+    assert {row["country"] for row in filtered.json()["data"]["data"]} == {"VN"}
 
 
 def test_smoke_type_b_purchase_order_summary_flow(
@@ -256,14 +256,14 @@ def test_smoke_type_b_purchase_order_summary_flow(
     assert validate.json()["status"] == "success"
     assert save.status_code == 201
     assert by_key.status_code == 200
-    data = by_key.json()["data"]
+    data = by_key.json()["data"]["data"]
     assert data["po_no"] == "PO-2026-0001"
     assert data["supplier_code"] == "SUP-1001"
     assert data["supplier_name"] == "ABC Industrial Supplies"
     assert data["po_status"] == "open"
     assert filtered.status_code == 200
-    assert any(row["po_no"] == "PO-2026-0001" for row in filtered.json()["data"])
-    assert {row["po_status"] for row in filtered.json()["data"]} == {"open"}
+    assert any(row["po_no"] == "PO-2026-0001" for row in filtered.json()["data"]["data"])
+    assert {row["po_status"] for row in filtered.json()["data"]["data"]} == {"open"}
 
 
 def test_smoke_api_key_scope_for_type_b_outbound(

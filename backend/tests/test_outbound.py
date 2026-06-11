@@ -9,6 +9,13 @@ from tests.test_inbound import create_sqlite_generated_table
 from tests.test_type_b_mapping import purchase_order_summary_payload
 
 
+def ob(response) -> dict:
+    """Unwrap the prompt-41 integration envelope {code,message,data} on /outbound — the old outbound
+    body (model/type/count/data/key/…) is now under ``data``."""
+    body = response.json()
+    return body["data"] if isinstance(body, dict) and {"code", "message", "data"} <= set(body) else body
+
+
 def create_invoice_model_and_records(
     client: TestClient,
     auth_headers: dict[str, str],
@@ -95,8 +102,8 @@ def test_outbound_list_returns_records(
     response = client.get("/outbound/invoice", headers=auth_headers)
 
     assert response.status_code == 200
-    assert response.json()["count"] == 2
-    assert set(response.json()["data"][0]) == {"invoice_no", "amount"}
+    assert ob(response)["count"] == 2
+    assert set(ob(response)["data"][0]) == {"invoice_no", "amount"}
 
 
 def test_outbound_by_key_returns_one_record(
@@ -109,8 +116,8 @@ def test_outbound_by_key_returns_one_record(
     response = client.get("/outbound/invoice/INV-001", headers=auth_headers)
 
     assert response.status_code == 200
-    assert response.json()["key"] == "INV-001"
-    assert response.json()["data"]["invoice_no"] == "INV-001"
+    assert ob(response)["key"] == "INV-001"
+    assert ob(response)["data"]["invoice_no"] == "INV-001"
 
 
 def test_include_meta_includes_system_columns(
@@ -121,7 +128,7 @@ def test_include_meta_includes_system_columns(
     create_invoice_model_and_records(client, auth_headers, db_session)
 
     response = client.get("/outbound/invoice?include_meta=true", headers=auth_headers)
-    record = response.json()["data"][0]
+    record = ob(response)["data"][0]
 
     assert response.status_code == 200
     assert "id" in record
@@ -137,7 +144,7 @@ def test_include_raw_includes_raw_payload(
     create_invoice_model_and_records(client, auth_headers, db_session)
 
     response = client.get("/outbound/invoice?include_raw=true", headers=auth_headers)
-    record = response.json()["data"][0]
+    record = ob(response)["data"][0]
 
     assert response.status_code == 200
     assert "raw_payload" in record
@@ -153,8 +160,8 @@ def test_equality_filter_works(
     response = client.get("/outbound/invoice?invoice_no=INV-001", headers=auth_headers)
 
     assert response.status_code == 200
-    assert response.json()["count"] == 1
-    assert response.json()["data"][0]["invoice_no"] == "INV-001"
+    assert ob(response)["count"] == 1
+    assert ob(response)["data"][0]["invoice_no"] == "INV-001"
 
 
 def test_invalid_filter_field_returns_422(
@@ -187,7 +194,7 @@ def test_type_b_supplier_list_returns_rows(
     response = client.get("/outbound/supplier", headers=auth_headers)
 
     assert response.status_code == 200
-    body = response.json()
+    body = ob(response)
     assert body["type"] == "B"
     assert body["count"] == 5
     assert body["data"][0]["supplier_code"] == "SUP-1001"
@@ -203,7 +210,7 @@ def test_type_b_supplier_by_key_returns_one_row(
     response = client.get("/outbound/supplier/SUP-1001", headers=auth_headers)
 
     assert response.status_code == 200
-    body = response.json()
+    body = ob(response)
     assert body["type"] == "B"
     assert body["key"] == "SUP-1001"
     assert body["data"]["supplier_name"] == "ABC Industrial Supplies"
@@ -218,8 +225,8 @@ def test_type_b_supplier_filter_works(
     response = client.get("/outbound/supplier?country=VN&status=active", headers=auth_headers)
 
     assert response.status_code == 200
-    assert response.json()["count"] == 3
-    assert {row["country"] for row in response.json()["data"]} == {"VN"}
+    assert ob(response)["count"] == 3
+    assert {row["country"] for row in ob(response)["data"]} == {"VN"}
 
 
 def test_type_b_invalid_filter_returns_422(
@@ -242,7 +249,7 @@ def test_type_b_include_raw_returns_400(
     response = client.get("/outbound/supplier?include_raw=true", headers=auth_headers)
 
     assert response.status_code == 400
-    assert response.json()["detail"] == "include_raw is only supported for Type A models."
+    assert response.json()["message"] == "include_raw is only supported for Type A models."
 
 
 def test_no_primary_key_returns_400_for_key_endpoint(
@@ -261,7 +268,7 @@ def test_no_primary_key_returns_400_for_key_endpoint(
     response = client.get("/outbound/invoice/INV-001", headers=auth_headers)
 
     assert response.status_code == 400
-    assert response.json()["detail"] == "No primary_key configured for this data model"
+    assert response.json()["message"] == "No primary_key configured for this data model"
 
 
 def test_type_b_no_primary_key_returns_400_for_key_endpoint(
@@ -289,7 +296,7 @@ def test_type_b_no_primary_key_returns_400_for_key_endpoint(
     response = client.get("/outbound/supplier_no_pk/SUP-1001", headers=auth_headers)
 
     assert response.status_code == 400
-    assert response.json()["detail"] == "No primary_key configured for this data model"
+    assert response.json()["message"] == "No primary_key configured for this data model"
 
 
 def test_record_not_found_returns_404(
@@ -401,7 +408,7 @@ def test_outbound_does_not_return_raw_table_columns_by_default(
     create_invoice_model_and_records(client, auth_headers, db_session)
 
     response = client.get("/outbound/invoice", headers=auth_headers)
-    record = response.json()["data"][0]
+    record = ob(response)["data"][0]
 
     assert "raw_payload" not in record
     assert "id" not in record
@@ -424,8 +431,8 @@ def test_api_key_outbound_works_for_type_b(
     response = client.get("/outbound/supplier", headers={"X-API-Key": api_key})
 
     assert response.status_code == 200
-    assert response.json()["type"] == "B"
-    assert response.json()["count"] == 5
+    assert ob(response)["type"] == "B"
+    assert ob(response)["count"] == 5
 
 
 def test_api_key_restricted_to_another_model_cannot_access_type_b(
@@ -460,9 +467,9 @@ def test_purchase_order_summary_view_can_be_queried(
     response = client.get("/outbound/purchase_order_summary?po_status=open", headers=auth_headers)
 
     assert response.status_code == 200
-    assert response.json()["type"] == "B"
-    assert response.json()["count"] == 2
-    assert {row["po_status"] for row in response.json()["data"]} == {"open"}
+    assert ob(response)["type"] == "B"
+    assert ob(response)["count"] == 2
+    assert {row["po_status"] for row in ob(response)["data"]} == {"open"}
 
 
 def test_purchase_order_summary_view_by_key_returns_summary(
@@ -483,7 +490,7 @@ def test_purchase_order_summary_view_by_key_returns_summary(
     )
 
     assert response.status_code == 200
-    data = response.json()["data"]
+    data = ob(response)["data"]
     assert data["po_no"] == "PO-2026-0001"
     assert data["supplier_name"] == "ABC Industrial Supplies"
     assert data["line_count"] == 2
