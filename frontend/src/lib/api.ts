@@ -664,25 +664,27 @@ export const listTransactions = (
   return req<Transaction[]>(`/transactions?${q.toString()}`);
 };
 
-// Inbound / Outbound
+// Inbound / Outbound — these integration routes return the {code,message,data} envelope (prompt 41).
+// We UNWRAP `data` here so the FE consumers keep the same raw shape (non-regression).
+export type ApiEnvelope<T> = { code: number; message: string; data: T };
 export type InboundResult = { status: string; model: string; record_id: string; message: string };
 export const inbound = (model: string, payload: Record<string, unknown>) =>
-  req<InboundResult>(`/inbound/${encodeURIComponent(model)}`, {
+  req<ApiEnvelope<InboundResult>>(`/inbound/${encodeURIComponent(model)}`, {
     method: "POST",
     body: JSON.stringify(payload),
-  });
+  }).then((e) => e.data);
 export const outbound = (model: string, params: { limit?: number; include_meta?: boolean } = {}) => {
   const q = new URLSearchParams();
   q.set("limit", String(params.limit ?? 50));
   if (params.include_meta) q.set("include_meta", "true");
-  return req<ModelPreview>(
+  return req<ApiEnvelope<ModelPreview>>(
     `/outbound/${encodeURIComponent(model)}?${q.toString()}`,
-  );
+  ).then((e) => e.data);
 };
 export const outboundByKey = (model: string, key: string) =>
-  req<{ status?: string; model?: string; type?: "A" | "B"; key?: string; data?: Record<string, unknown> }>(
+  req<ApiEnvelope<{ status?: string; model?: string; type?: "A" | "B"; key?: string; data?: Record<string, unknown> }>>(
     `/outbound/${encodeURIComponent(model)}/${encodeURIComponent(key)}`,
-  );
+  ).then((e) => e.data);
 
 // Admin demo
 export const procurementStagingSummary = () =>

@@ -4,6 +4,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_request_auth_context
+from app.api.envelope import EnvelopeRoute
 from app.db.session import get_db
 from app.schemas.transaction import InboundResponse
 from app.services.api_key_service import ApiKeyScopeError, AuthContext, enforce_api_key_scope
@@ -14,9 +15,11 @@ from app.services.inbound_service import (
 )
 
 
+# route_class=EnvelopeRoute → every response on this integration router is wrapped {code,message,data}.
 router = APIRouter(
     prefix="/inbound",
     tags=["inbound"],
+    route_class=EnvelopeRoute,
 )
 
 
