@@ -271,11 +271,11 @@ function emptyJoin(baseSchema: string): TypeBJoin {
   };
 }
 
-// Stable key for a (schema·table·column) source option. pg identifiers are [a-z0-9_], so "//" is a
-// safe separator that never collides with a real schema/table/column name.
+// Stable key for a (schema, table) pair. pg identifiers are [a-z0-9_], so "//" is a safe separator
+// that never collides with a real schema/table name. Used by the Source-table dropdown (F).
 const SRC_SEP = "//";
-function sourceOptionKey(schema?: string | null, table?: string | null, column?: string | null): string {
-  return column ? `${schema || ""}${SRC_SEP}${table || ""}${SRC_SEP}${column}` : "";
+function tableKey(schema?: string | null, table?: string | null): string {
+  return table ? `${schema || ""}${SRC_SEP}${table}` : "";
 }
 
 function cellText(value: unknown): string {
@@ -450,8 +450,8 @@ export default function DataModelsPage() {
   const [tables, setTables] = useState<DbTable[]>([]);
   const [sourceTable, setSourceTable] = useState("");
   const [columns, setColumns] = useState<DbColumn[]>([]);
-  // Lazy caches so the joins editor (A) and per-attribute "Cột nguồn" dropdown (B) can list tables
-  // for ANY schema and columns for ANY joined table, not just the base. Keyed `${schema}.${table}`.
+  // Lazy caches so the joins editor and the per-attribute Source table/column dropdowns can list
+  // tables for ANY schema and columns for ANY joined table, not just the base. Keyed `${schema}.${table}`.
   const [tablesBySchema, setTablesBySchema] = useState<Record<string, DbTable[]>>({});
   const [columnsByTable, setColumnsByTable] = useState<Record<string, DbColumn[]>>({});
   const colFetchRef = useRef<Set<string>>(new Set());
@@ -512,7 +512,7 @@ export default function DataModelsPage() {
       .catch((error) => setFormErrors(errorMessages(error)));
   }, [form.type, mode, sourceSchema, sourceTable]);
 
-  // A joined table's schema is implied: the base table → base schema; any other table → the schema
+  // A joined table's schema is implied: the base table -> base schema; any other table -> the schema
   // of the join that brings it in (right.schema). Mirrors the backend's schemaForTable.
   const resolveSchemaForTable = useCallback(
     (table: string): string => {
@@ -540,8 +540,8 @@ export default function DataModelsPage() {
   }, [mode, form.type, form.relationships, sourceSchema, tablesBySchema]);
 
   // Lazily fetch columns for every table referenced by a join (left + right) so the join column
-  // dropdowns (A) and the aggregated "Cột nguồn" dropdown (B) can list them. The base table's
-  // columns already live in `columns`.
+  // join column dropdowns and the per-attribute Source column dropdown can list them. The base
+  // table's columns already live in `columns`.
   useEffect(() => {
     if (!mode || form.type !== "B") return;
     const pairs: { schema: string; table: string }[] = [];
@@ -584,17 +584,6 @@ export default function DataModelsPage() {
     },
     [columns, columnsByTable, sourceTable],
   );
-
-  // Every (table·column) pair across base + joined tables — the option list for the "Cột nguồn" dropdown (B).
-  const sourceColumnOptions = useMemo(() => {
-    const opts: { schema: string; table: string; column: string; data_type: string }[] = [];
-    for (const { schema, table } of availableTables) {
-      for (const column of columnsFor(schema, table)) {
-        opts.push({ schema, table, column: column.column_name, data_type: column.data_type });
-      }
-    }
-    return opts;
-  }, [availableTables, columnsFor]);
 
   const filteredModels = useMemo(() => {
     const needle = search.trim().toLowerCase();
@@ -644,7 +633,7 @@ export default function DataModelsPage() {
   // Apply a patch to attributes[index] AND keep form.primary_key in lock-step with the PRIMARY
   // attribute's CURRENT name. Renaming the PK attribute (the radio-selected one, or the one whose
   // name equals primary_key) carries primary_key along, so the payload's primary_key always equals
-  // an existing attribute.name — no more backend "primary_key must match one of the attribute names".
+  // an existing attribute.name - no more backend "primary_key must match one of the attribute names".
   function applyAttributePatch(
     current: FormState,
     index: number,
@@ -655,12 +644,12 @@ export default function DataModelsPage() {
       i === index ? { ...attribute, ...patch } : attribute,
     );
     let primary_key = current.primary_key;
-    // Identify the PK row by its is_primary_key FLAG only (authoritative — set by setPrimaryAttribute,
+    // Identify the PK row by its is_primary_key FLAG only (authoritative - set by setPrimaryAttribute,
     // formFromModel, generate/remove). The old "name === primary_key" heuristic could mis-fire on a
     // non-PK row that coincidentally shared the PK's name (reachable via the source dropdown, which
     // can set duplicate names) and silently steal the primary key.
     if (patch.name !== undefined && old?.is_primary_key === true) {
-      primary_key = patch.name; // PK attribute renamed → follow it
+      primary_key = patch.name; // PK attribute renamed -> follow it
     }
     return { ...current, attributes: attrs, primary_key };
   }
@@ -689,7 +678,7 @@ export default function DataModelsPage() {
       const newRight = relationships[index]?.right?.table;
       // If this join's right table changed (incl. cleared by a schema change), any OTHER join that
       // used the OLD right table as its left table is now orphaned (that table is no longer reachable)
-      // → reset its left to the base table so the stale value can't silently persist and break Save.
+      // -> reset its left to the base table so the stale value can't silently persist and break Save.
       if (oldRight && oldRight !== newRight) {
         relationships = relationships.map((join, i) =>
           i !== index && join.left?.table === oldRight ? { ...join, left: { table: "", column: "" } } : join,
@@ -699,7 +688,26 @@ export default function DataModelsPage() {
     });
   }
   function removeJoin(index: number) {
-    setForm((current) => ({ ...current, relationships: current.relationships.filter((_, i) => i !== index) }));
+    setForm((current) => {
+      const removedTable = current.relationships[index]?.right?.table;
+      const relationships = current.relationships.filter((_, i) => i !== index);
+      // If the removed join was the only one reaching `removedTable`, that table is no longer mappable.
+      // Reset any attribute mapped to it (and any other join's left referencing it) back to the base
+      // table so an orphaned source can't silently persist (blank dropdown) and break Save.
+      const stillReachable = !removedTable || relationships.some((j) => j.right?.table === removedTable);
+      if (!removedTable || stillReachable) return { ...current, relationships };
+      return {
+        ...current,
+        relationships: relationships.map((j) =>
+          j.left?.table === removedTable ? { ...j, left: { table: "", column: "" } } : j,
+        ),
+        attributes: current.attributes.map((a) =>
+          a.source_table === removedTable
+            ? { ...a, source_schema: undefined, source_table: undefined, source_column: undefined }
+            : a,
+        ),
+      };
+    });
   }
 
   function addAttribute() {
@@ -763,24 +771,40 @@ export default function DataModelsPage() {
     ]);
   }
 
-  // B: picking a column from the "Cột nguồn" dropdown auto-fills source schema/table/column, suggests
-  // the data_type, and sets the attribute name (still editable). PK sync runs via applyAttributePatch.
-  function selectAttributeSource(index: number, value: string) {
-    const option = sourceColumnOptions.find(
-      (o) => sourceOptionKey(o.schema, o.table, o.column) === value,
-    );
-    if (!option) return; // placeholder selected → leave the row's existing mapping untouched
-    const suggested = attrName(option.column);
+  // F: the attribute source is two cascading dropdowns (Source table -> Source column).
+  // Picking a table sets source_schema/table and clears the column (its old column may not exist
+  // in the new table). The base table maps to source_schema=base; a joined table to its own schema.
+  function selectAttributeTable(index: number, value: string) {
+    const [schema, table] = value ? value.split(SRC_SEP) : ["", ""];
     setForm((current) =>
       applyAttributePatch(current, index, {
-        name: suggested,
-        display_name: titleize(suggested),
-        data_type: normalizePgType(option.data_type),
-        source_schema: option.schema,
-        source_table: option.table,
-        source_column: option.column,
+        source_schema: table ? schema : undefined,
+        source_table: table || undefined,
+        source_column: undefined,
       }),
     );
+  }
+
+  // F: picking the column auto-fills data_type and sets the attribute name (still editable).
+  // PK sync runs via applyAttributePatch (so renaming/source-picking the PK row keeps primary_key).
+  function selectAttributeColumn(index: number, schema: string, table: string, columnName: string) {
+    if (!columnName) return; // placeholder -> leave the row's existing column untouched
+    const column = columnsFor(schema, table).find((c) => c.column_name === columnName);
+    const suggested = attrName(columnName);
+    setForm((current) => {
+      const existing = current.attributes[index];
+      const patch: Partial<DataModelAttribute> = {
+        data_type: normalizePgType(column?.data_type || "text"),
+        source_schema: schema,
+        source_table: table,
+        source_column: columnName,
+      };
+      // Auto-fill name/display_name ONLY when empty, so re-picking a source for a curated attribute
+      // (edit mode) doesn't clobber its name (and, via applyAttributePatch, the PK that follows it).
+      if (!existing?.name?.trim()) patch.name = suggested;
+      if (!existing?.display_name?.trim()) patch.display_name = titleize(suggested);
+      return applyAttributePatch(current, index, patch);
+    });
   }
 
   function buildPayload(): DataModelCreate {
@@ -803,14 +827,17 @@ export default function DataModelsPage() {
           description: emptyToNull(attribute.description || ""),
           sensitivity: emptyToNull(attribute.sensitivity || ""),
           // Per-attribute source overrides the base table (multi-table, prompt 38); blank = base.
-          source_schema: form.type === "B" ? schemaForTable(table || "") : attribute.source_schema || undefined,
+          // Honour the schema the Source-table dropdown stored (it carries the exact schema via
+          // tableKey) so a table name joined from two different schemas keeps the right one; fall
+          // back to deriving it from the join graph by table name.
+          source_schema: form.type === "B" ? attribute.source_schema || schemaForTable(table || "") : attribute.source_schema || undefined,
           source_table: form.type === "B" ? table || undefined : attribute.source_table || undefined,
           source_column: attribute.source_column || undefined,
           is_primary_key: attribute.is_primary_key || name === form.primary_key,
         };
       });
     // C: the primary_key we send is GUARANTEED to equal one of the attribute names (snaked), and
-    // is_primary_key is flagged on exactly that attribute — so the backend never rejects with
+    // is_primary_key is flagged on exactly that attribute - so the backend never rejects with
     // "primary_key must match one of the attribute names".
     const attrNames = new Set(attributes.map((attribute) => attribute.name));
     let primary = form.primary_key;
@@ -820,7 +847,7 @@ export default function DataModelsPage() {
     for (const attribute of attributes) attribute.is_primary_key = attribute.name === primary;
     // Blank "Left table" defaults to the base table (honours the field's placeholder) before filtering.
     // Safety net for A: a join whose left table is no longer reachable (base, or another join's right
-    // table) is dropped rather than sent — so an orphaned/stale join can't break Save with a cryptic
+    // table) is dropped rather than sent - so an orphaned/stale join can't break Save with a cryptic
     // backend error. (updateJoin already cascade-clears most of these to the base table.)
     const rightTables = new Set(form.relationships.map((join) => join.right?.table).filter(Boolean));
     const reachableLeft = (table: string) => !table || table === sourceTable || rightTables.has(table);
@@ -867,7 +894,7 @@ export default function DataModelsPage() {
     if (!payload.primary_key) {
       errors.push({ field: "primary_key", message: "Select a primary key attribute." });
     }
-    // Surface duplicate attribute names (the source dropdown can suggest a name that collides) — they
+    // Surface duplicate attribute names (the source dropdown can suggest a name that collides) - they
     // make is_primary_key ambiguous and the backend rejects them anyway.
     const seenNames = new Map<string, number>();
     payload.attributes.forEach((attribute, index) => {
@@ -875,6 +902,11 @@ export default function DataModelsPage() {
       if (first === undefined) seenNames.set(attribute.name, index);
       else errors.push({ field: `attributes[${index}].name`, message: `Duplicate attribute name "${attribute.name}".` });
     });
+    // A Type B attribute can only map to the base table or a joined table. Flag an orphaned source
+    // (e.g. its join was removed) on the FE instead of letting the backend reject it cryptically.
+    const reachableTables = new Set<string>(
+      [sourceTable, ...(payload.relationships || []).map((join) => join.right?.table)].filter(Boolean) as string[],
+    );
     payload.attributes.forEach((attribute, index) => {
       if (!/^[a-z][a-z0-9_]*$/.test(attribute.name)) {
         errors.push({ field: `attributes[${index}].name`, message: "Attribute name must be lowercase snake_case." });
@@ -884,6 +916,11 @@ export default function DataModelsPage() {
       }
       if (payload.type === "B" && (!attribute.source_schema || !attribute.source_table || !attribute.source_column)) {
         errors.push({ field: `attributes[${index}].source_column`, message: "Type B attributes require source mapping." });
+      } else if (payload.type === "B" && attribute.source_table && !reachableTables.has(attribute.source_table)) {
+        errors.push({
+          field: `attributes[${index}].source_table`,
+          message: `Source table "${attribute.source_table}" is not the base table or a joined table. Add a join or pick another source.`,
+        });
       }
     });
     return errors;
@@ -1669,10 +1706,9 @@ export default function DataModelsPage() {
               <option value="active">Active</option>
               <option value="inactive">Inactive</option>
             </Select>
-            <label className="flex items-end gap-2 pb-2 text-sm text-neutral-700">
-              <input type="checkbox" checked={form.ai_enabled} onChange={(event) => patchForm({ ai_enabled: event.target.checked })} />
-              AI enabled
-            </label>
+            {/* G (prompt 43): "AI enabled" removed from the Create/Edit form. The backend field stays
+                (default true); the form still carries ai_enabled (default true / loaded value) and
+                buildPayload sends it unchanged, so models save fine without the toggle. */}
             <label className="md:col-span-3 block">
               <span className="mb-1.5 block text-sm font-medium text-neutral-700">Business definition</span>
               <textarea
@@ -1740,16 +1776,16 @@ export default function DataModelsPage() {
       <div className="mt-4 rounded-md border border-neutral-200 p-3">
         <div className="mb-2 flex items-center justify-between">
           <div>
-            <h4 className="text-sm font-semibold text-neutral-700">Quan hệ / Joins (multi-table)</h4>
+            <h4 className="text-sm font-semibold text-neutral-700">Relationships / Joins (multi-table)</h4>
             <p className="text-xs text-neutral-500">
-              Bảng chính là bảng của thuộc tính khóa chính. Thêm join để kéo cột từ bảng phụ —
-              <code>Cột khóa phụ</code> phải duy nhất (N:1) trừ khi bật fan-out.
+              The base table is the primary-key attribute&apos;s table. Add a join to pull columns from
+              another table. The <code>Joined key column</code> must be unique (N:1) unless fan-out is allowed.
             </p>
           </div>
           <Button size="sm" variant="secondary" onClick={addJoin}>Add Join</Button>
         </div>
         {form.relationships.length === 0 ? (
-          <p className="text-xs text-neutral-400">Chưa có join — model một bảng.</p>
+          <p className="text-xs text-neutral-400">No joins - single-table model.</p>
         ) : (
           <div className="space-y-2">
             {form.relationships.map((join, index) => {
@@ -1773,29 +1809,29 @@ export default function DataModelsPage() {
                     <option value="inner">inner</option>
                   </Select>
                   <Select
-                    label="Bảng chính"
+                    label="Base table"
                     value={join.left.table}
                     onChange={(event) => updateJoin(index, { left: { table: event.target.value, column: "" } })}
                     className="h-8 min-w-[180px] font-mono text-[11px]"
                   >
-                    <option value="">{sourceTable ? `${sourceTable} (bảng chính)` : "- bảng chính -"}</option>
+                    <option value="">{sourceTable ? `${sourceTable} (base)` : "- base table -"}</option>
                     {leftTableOptions.map((t) => (
                       <option key={`${t.schema}.${t.table}`} value={t.table}>{t.table}</option>
                     ))}
                   </Select>
                   <Select
-                    label="Cột khóa chính"
+                    label="Base key column"
                     value={join.left.column}
                     onChange={(event) => updateJoin(index, { left: { ...join.left, column: event.target.value } })}
                     className="h-8 min-w-[160px] font-mono text-[11px]"
                   >
-                    <option value="">- cột khóa chính -</option>
+                    <option value="">- base key column -</option>
                     {leftColumns.map((column) => (
                       <option key={column.column_name} value={column.column_name}>{column.column_name}</option>
                     ))}
                   </Select>
                   <Select
-                    label="Schema (bảng phụ)"
+                    label="Joined schema"
                     value={join.right.schema}
                     onChange={(event) => updateJoin(index, { right: { schema: event.target.value, table: "", column: "" } })}
                     className="h-8 min-w-[150px] font-mono text-[11px]"
@@ -1804,23 +1840,23 @@ export default function DataModelsPage() {
                     {schemas.map((schema) => <option key={schema} value={schema}>{schema}</option>)}
                   </Select>
                   <Select
-                    label="Bảng phụ"
+                    label="Joined table"
                     value={join.right.table}
                     onChange={(event) => updateJoin(index, { right: { ...join.right, table: event.target.value, column: "" } })}
                     className="h-8 min-w-[180px] font-mono text-[11px]"
                   >
-                    <option value="">- bảng phụ -</option>
+                    <option value="">- joined table -</option>
                     {rightTables.map((table) => (
                       <option key={table.table_name} value={table.table_name}>{table.table_name}</option>
                     ))}
                   </Select>
                   <Select
-                    label="Cột khóa phụ"
+                    label="Joined key column"
                     value={join.right.column}
                     onChange={(event) => updateJoin(index, { right: { ...join.right, column: event.target.value } })}
                     className="h-8 min-w-[160px] font-mono text-[11px]"
                   >
-                    <option value="">- cột khóa phụ -</option>
+                    <option value="">- joined key column -</option>
                     {rightColumns.map((column) => (
                       <option key={column.column_name} value={column.column_name}>{column.column_name}</option>
                     ))}
@@ -1850,33 +1886,51 @@ export default function DataModelsPage() {
     );
   }
 
-  // B: one dropdown per attribute listing every column from the base table + joined tables as
-  // `table·column`. Picking it auto-fills source schema/table/column + data_type + name (editable).
-  function renderSourceColumnSelect(attribute: DataModelAttribute, index: number) {
-    const currentKey = sourceOptionKey(attribute.source_schema, attribute.source_table, attribute.source_column);
-    const known = sourceColumnOptions.some((o) => sourceOptionKey(o.schema, o.table, o.column) === currentKey);
+  // F: two cascading dropdowns per attribute - Source table (base + joined tables) then Source column
+  // (columns of THAT table). Picking the column auto-fills data_type + name. Multi-table: the table
+  // list is base + every joined table; columns load per the selected table via db-browser.
+  function renderSourceCell(attribute: DataModelAttribute, index: number) {
+    const attrTable = attribute.source_table || sourceTable;
+    const attrSchema = attribute.source_table ? attribute.source_schema || resolveSchemaForTable(attrTable) : sourceSchema;
+    const cols = columnsFor(attrSchema, attrTable);
+    const colKnown = !attribute.source_column || cols.some((c) => c.column_name === attribute.source_column);
+    const curTableKey = tableKey(attrSchema, attrTable);
+    const tableKnown = !attribute.source_table || availableTables.some((t) => tableKey(t.schema, t.table) === curTableKey);
     return (
-      <Select
-        aria-label="Cột nguồn"
-        value={currentKey}
-        onChange={(event) => selectAttributeSource(index, event.target.value)}
-        className="h-8 w-full font-mono text-[11px]"
-      >
-        <option value="">- chọn cột nguồn -</option>
-        {/* Keep the current mapping visible even before its (joined) table's columns finish loading. */}
-        {currentKey && !known && (
-          <option value={currentKey}>
-            {`${attribute.source_table || sourceTable}·${attribute.source_column} (hiện tại)`}
-          </option>
-        )}
-        {sourceColumnOptions.map((o) => {
-          const key = sourceOptionKey(o.schema, o.table, o.column);
-          // Qualify the table with its schema when it differs from the base, so two same-named tables
-          // in different schemas stay distinguishable in the label (not just the value).
-          const tableLabel = o.schema && o.schema !== sourceSchema ? `${o.schema}.${o.table}` : o.table;
-          return <option key={key} value={key}>{`${tableLabel}·${o.column}`}</option>;
-        })}
-      </Select>
+      <div className="flex flex-col gap-1">
+        <Select
+          aria-label="Source table"
+          value={curTableKey}
+          onChange={(event) => selectAttributeTable(index, event.target.value)}
+          className="h-7 w-full font-mono text-[11px]"
+        >
+          <option value="">- source table -</option>
+          {/* Keep an orphaned mapping visible (e.g. its join was removed) instead of a blank select. */}
+          {attribute.source_table && !tableKnown && (
+            <option value={curTableKey}>{`${attrSchema}.${attrTable} (current)`}</option>
+          )}
+          {availableTables.map((t) => {
+            // Qualify with schema when it differs from the base so same-named tables stay distinct.
+            const label = t.schema && t.schema !== sourceSchema ? `${t.schema}.${t.table}` : t.table;
+            return <option key={tableKey(t.schema, t.table)} value={tableKey(t.schema, t.table)}>{label}</option>;
+          })}
+        </Select>
+        <Select
+          aria-label="Source column"
+          value={attribute.source_column || ""}
+          onChange={(event) => selectAttributeColumn(index, attrSchema, attrTable, event.target.value)}
+          className="h-7 w-full font-mono text-[11px]"
+        >
+          <option value="">- source column -</option>
+          {/* Keep the saved column selectable even before its table's columns finish loading. */}
+          {attribute.source_column && !colKnown && (
+            <option value={attribute.source_column}>{`${attribute.source_column} (current)`}</option>
+          )}
+          {cols.map((column) => (
+            <option key={column.column_name} value={column.column_name}>{column.column_name}</option>
+          ))}
+        </Select>
+      </div>
     );
   }
 
@@ -1898,7 +1952,7 @@ export default function DataModelsPage() {
             <TH>Attribute</TH>
             <TH>Display Name</TH>
             <TH>Data Type</TH>
-            {typeB && <TH>Cột nguồn (bảng·cột)</TH>}
+            {typeB && <TH>Source table / column</TH>}
             <TH className="text-center">Required</TH>
             <TH className="text-center">Primary</TH>
             {!typeB && <TH>Description</TH>}
@@ -1937,7 +1991,7 @@ export default function DataModelsPage() {
                   {ATTR_TYPES.map((type) => <option key={type} value={type}>{type}</option>)}
                 </Select>
               </TD>
-              {typeB && <TD>{renderSourceColumnSelect(attribute, index)}</TD>}
+              {typeB && <TD>{renderSourceCell(attribute, index)}</TD>}
               <TD className="text-center">
                 <input
                   type="checkbox"
