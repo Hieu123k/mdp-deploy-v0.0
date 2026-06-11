@@ -216,7 +216,12 @@ function formFromModel(model: DataModel): FormState {
     sensitivity_level: model.sensitivity_level || "internal",
     ai_enabled: model.ai_enabled ?? true,
     status: model.status || "active",
-    attributes: (model.attributes || []).map((attribute) => ({ ...attribute })),
+    // Reconcile is_primary_key against primary_key so the FLAG is the single authoritative PK signal
+    // (applyAttributePatch + the radio rely on it). Falls back to the stored flag if no primary_key.
+    attributes: (model.attributes || []).map((attribute) => ({
+      ...attribute,
+      is_primary_key: model.primary_key ? attribute.name === model.primary_key : !!attribute.is_primary_key,
+    })),
     relationships: (model.relationships || []).map((join) => ({ ...join })),
   };
 }
@@ -264,6 +269,13 @@ function emptyJoin(baseSchema: string): TypeBJoin {
     left: { table: "", column: "" },
     right: { schema: baseSchema || "mdp_staging", table: "", column: "" },
   };
+}
+
+// Stable key for a (schema·table·column) source option. pg identifiers are [a-z0-9_], so "//" is a
+// safe separator that never collides with a real schema/table/column name.
+const SRC_SEP = "//";
+function sourceOptionKey(schema?: string | null, table?: string | null, column?: string | null): string {
+  return column ? `${schema || ""}${SRC_SEP}${table || ""}${SRC_SEP}${column}` : "";
 }
 
 function cellText(value: unknown): string {
@@ -438,6 +450,12 @@ export default function DataModelsPage() {
   const [tables, setTables] = useState<DbTable[]>([]);
   const [sourceTable, setSourceTable] = useState("");
   const [columns, setColumns] = useState<DbColumn[]>([]);
+  // Lazy caches so the joins editor (A) and per-attribute "Cột nguồn" dropdown (B) can list tables
+  // for ANY schema and columns for ANY joined table, not just the base. Keyed `${schema}.${table}`.
+  const [tablesBySchema, setTablesBySchema] = useState<Record<string, DbTable[]>>({});
+  const [columnsByTable, setColumnsByTable] = useState<Record<string, DbColumn[]>>({});
+  const colFetchRef = useRef<Set<string>>(new Set());
+  const tblFetchRef = useRef<Set<string>>(new Set());
 
   const [typeFilter, setTypeFilter] = useState("");
   const [domainFilter, setDomainFilter] = useState("");
@@ -494,6 +512,90 @@ export default function DataModelsPage() {
       .catch((error) => setFormErrors(errorMessages(error)));
   }, [form.type, mode, sourceSchema, sourceTable]);
 
+  // A joined table's schema is implied: the base table → base schema; any other table → the schema
+  // of the join that brings it in (right.schema). Mirrors the backend's schemaForTable.
+  const resolveSchemaForTable = useCallback(
+    (table: string): string => {
+      if (!table || table === sourceTable) return sourceSchema;
+      const join = (form.type === "B" ? form.relationships : []).find((j) => j.right?.table === table);
+      return join?.right?.schema || sourceSchema;
+    },
+    [form.relationships, form.type, sourceSchema, sourceTable],
+  );
+
+  // Lazily fetch the table list for the base schema + every join's right schema (A: right-table dropdown).
+  useEffect(() => {
+    if (!mode || form.type !== "B") return;
+    const needed = new Set<string>();
+    if (sourceSchema) needed.add(sourceSchema);
+    for (const join of form.relationships) if (join.right?.schema) needed.add(join.right.schema);
+    needed.forEach((schema) => {
+      if (tablesBySchema[schema] || tblFetchRef.current.has(schema)) return;
+      tblFetchRef.current.add(schema);
+      listTables(schema)
+        .then((items) => setTablesBySchema((m) => (m[schema] ? m : { ...m, [schema]: items })))
+        .catch(() => {})
+        .finally(() => tblFetchRef.current.delete(schema));
+    });
+  }, [mode, form.type, form.relationships, sourceSchema, tablesBySchema]);
+
+  // Lazily fetch columns for every table referenced by a join (left + right) so the join column
+  // dropdowns (A) and the aggregated "Cột nguồn" dropdown (B) can list them. The base table's
+  // columns already live in `columns`.
+  useEffect(() => {
+    if (!mode || form.type !== "B") return;
+    const pairs: { schema: string; table: string }[] = [];
+    for (const join of form.relationships) {
+      if (join.right?.schema && join.right?.table) pairs.push({ schema: join.right.schema, table: join.right.table });
+      if (join.left?.table) pairs.push({ schema: resolveSchemaForTable(join.left.table), table: join.left.table });
+    }
+    for (const { schema, table } of pairs) {
+      if (!schema || !table || table === sourceTable) continue; // base handled by `columns`
+      const key = `${schema}.${table}`;
+      if (columnsByTable[key] || colFetchRef.current.has(key)) continue;
+      colFetchRef.current.add(key);
+      listColumns(schema, table)
+        .then((items) => setColumnsByTable((m) => (m[key] ? m : { ...m, [key]: items })))
+        .catch(() => {})
+        .finally(() => colFetchRef.current.delete(key));
+    }
+  }, [mode, form.type, form.relationships, sourceTable, resolveSchemaForTable, columnsByTable]);
+
+  // The tables reachable for mapping: base table + every join's right table (deduped, ordered).
+  const availableTables = useMemo(() => {
+    const list: { schema: string; table: string }[] = [];
+    if (sourceTable) list.push({ schema: sourceSchema, table: sourceTable });
+    for (const join of form.type === "B" ? form.relationships : []) {
+      if (join.right?.table) list.push({ schema: join.right.schema, table: join.right.table });
+    }
+    const seen = new Set<string>();
+    return list.filter(({ schema, table }) => {
+      const key = `${schema}.${table}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }, [sourceSchema, sourceTable, form.relationships, form.type]);
+
+  const columnsFor = useCallback(
+    (schema: string, table: string): DbColumn[] => {
+      if (table && table === sourceTable) return columns;
+      return columnsByTable[`${schema}.${table}`] || [];
+    },
+    [columns, columnsByTable, sourceTable],
+  );
+
+  // Every (table·column) pair across base + joined tables — the option list for the "Cột nguồn" dropdown (B).
+  const sourceColumnOptions = useMemo(() => {
+    const opts: { schema: string; table: string; column: string; data_type: string }[] = [];
+    for (const { schema, table } of availableTables) {
+      for (const column of columnsFor(schema, table)) {
+        opts.push({ schema, table, column: column.column_name, data_type: column.data_type });
+      }
+    }
+    return opts;
+  }, [availableTables, columnsFor]);
+
   const filteredModels = useMemo(() => {
     const needle = search.trim().toLowerCase();
     return models.filter((model) => {
@@ -539,13 +641,32 @@ export default function DataModelsPage() {
     setTemplateForm((current) => ({ ...current, ...patch }));
   }
 
+  // Apply a patch to attributes[index] AND keep form.primary_key in lock-step with the PRIMARY
+  // attribute's CURRENT name. Renaming the PK attribute (the radio-selected one, or the one whose
+  // name equals primary_key) carries primary_key along, so the payload's primary_key always equals
+  // an existing attribute.name — no more backend "primary_key must match one of the attribute names".
+  function applyAttributePatch(
+    current: FormState,
+    index: number,
+    patch: Partial<DataModelAttribute>,
+  ): FormState {
+    const old = current.attributes[index];
+    const attrs = current.attributes.map((attribute, i) =>
+      i === index ? { ...attribute, ...patch } : attribute,
+    );
+    let primary_key = current.primary_key;
+    // Identify the PK row by its is_primary_key FLAG only (authoritative — set by setPrimaryAttribute,
+    // formFromModel, generate/remove). The old "name === primary_key" heuristic could mis-fire on a
+    // non-PK row that coincidentally shared the PK's name (reachable via the source dropdown, which
+    // can set duplicate names) and silently steal the primary key.
+    if (patch.name !== undefined && old?.is_primary_key === true) {
+      primary_key = patch.name; // PK attribute renamed → follow it
+    }
+    return { ...current, attributes: attrs, primary_key };
+  }
+
   function updateAttribute(index: number, patch: Partial<DataModelAttribute>) {
-    setForm((current) => {
-      const attrs = current.attributes.map((attribute, i) =>
-        i === index ? { ...attribute, ...patch } : attribute,
-      );
-      return { ...current, attributes: attrs };
-    });
+    setForm((current) => applyAttributePatch(current, index, patch));
   }
 
   function setPrimaryAttribute(index: number) {
@@ -562,10 +683,20 @@ export default function DataModelsPage() {
     setForm((current) => ({ ...current, relationships: [...current.relationships, emptyJoin(sourceSchema)] }));
   }
   function updateJoin(index: number, patch: Partial<TypeBJoin>) {
-    setForm((current) => ({
-      ...current,
-      relationships: current.relationships.map((join, i) => (i === index ? { ...join, ...patch } : join)),
-    }));
+    setForm((current) => {
+      const oldRight = current.relationships[index]?.right?.table;
+      let relationships = current.relationships.map((join, i) => (i === index ? { ...join, ...patch } : join));
+      const newRight = relationships[index]?.right?.table;
+      // If this join's right table changed (incl. cleared by a schema change), any OTHER join that
+      // used the OLD right table as its left table is now orphaned (that table is no longer reachable)
+      // → reset its left to the base table so the stale value can't silently persist and break Save.
+      if (oldRight && oldRight !== newRight) {
+        relationships = relationships.map((join, i) =>
+          i !== index && join.left?.table === oldRight ? { ...join, left: { table: "", column: "" } } : join,
+        );
+      }
+      return { ...current, relationships };
+    });
   }
   function removeJoin(index: number) {
     setForm((current) => ({ ...current, relationships: current.relationships.filter((_, i) => i !== index) }));
@@ -632,9 +763,24 @@ export default function DataModelsPage() {
     ]);
   }
 
-  function sourceColumnType(name?: string | null): AttrType {
-    const column = columns.find((item) => item.column_name === name);
-    return normalizePgType(column?.data_type || "text");
+  // B: picking a column from the "Cột nguồn" dropdown auto-fills source schema/table/column, suggests
+  // the data_type, and sets the attribute name (still editable). PK sync runs via applyAttributePatch.
+  function selectAttributeSource(index: number, value: string) {
+    const option = sourceColumnOptions.find(
+      (o) => sourceOptionKey(o.schema, o.table, o.column) === value,
+    );
+    if (!option) return; // placeholder selected → leave the row's existing mapping untouched
+    const suggested = attrName(option.column);
+    setForm((current) =>
+      applyAttributePatch(current, index, {
+        name: suggested,
+        display_name: titleize(suggested),
+        data_type: normalizePgType(option.data_type),
+        source_schema: option.schema,
+        source_table: option.table,
+        source_column: option.column,
+      }),
+    );
   }
 
   function buildPayload(): DataModelCreate {
@@ -663,13 +809,26 @@ export default function DataModelsPage() {
           is_primary_key: attribute.is_primary_key || name === form.primary_key,
         };
       });
-    const primary = form.primary_key || attributes.find((attribute) => attribute.is_primary_key)?.name || "";
+    // C: the primary_key we send is GUARANTEED to equal one of the attribute names (snaked), and
+    // is_primary_key is flagged on exactly that attribute — so the backend never rejects with
+    // "primary_key must match one of the attribute names".
+    const attrNames = new Set(attributes.map((attribute) => attribute.name));
+    let primary = form.primary_key;
+    if (!primary || !attrNames.has(primary)) {
+      primary = attributes.find((attribute) => attribute.is_primary_key)?.name || attributes[0]?.name || "";
+    }
+    for (const attribute of attributes) attribute.is_primary_key = attribute.name === primary;
     // Blank "Left table" defaults to the base table (honours the field's placeholder) before filtering.
+    // Safety net for A: a join whose left table is no longer reachable (base, or another join's right
+    // table) is dropped rather than sent — so an orphaned/stale join can't break Save with a cryptic
+    // backend error. (updateJoin already cascade-clears most of these to the base table.)
+    const rightTables = new Set(form.relationships.map((join) => join.right?.table).filter(Boolean));
+    const reachableLeft = (table: string) => !table || table === sourceTable || rightTables.has(table);
     const relationships =
       form.type === "B"
         ? form.relationships
             .map((join) => ({ ...join, left: { ...join.left, table: join.left.table || sourceTable } }))
-            .filter(isCompleteJoin)
+            .filter((join) => isCompleteJoin(join) && reachableLeft(join.left.table))
         : null;
     return {
       relationships: relationships && relationships.length ? relationships : null,
@@ -708,6 +867,14 @@ export default function DataModelsPage() {
     if (!payload.primary_key) {
       errors.push({ field: "primary_key", message: "Select a primary key attribute." });
     }
+    // Surface duplicate attribute names (the source dropdown can suggest a name that collides) — they
+    // make is_primary_key ambiguous and the backend rejects them anyway.
+    const seenNames = new Map<string, number>();
+    payload.attributes.forEach((attribute, index) => {
+      const first = seenNames.get(attribute.name);
+      if (first === undefined) seenNames.set(attribute.name, index);
+      else errors.push({ field: `attributes[${index}].name`, message: `Duplicate attribute name "${attribute.name}".` });
+    });
     payload.attributes.forEach((attribute, index) => {
       if (!/^[a-z][a-z0-9_]*$/.test(attribute.name)) {
         errors.push({ field: `attributes[${index}].name`, message: "Attribute name must be lowercase snake_case." });
@@ -1573,81 +1740,143 @@ export default function DataModelsPage() {
       <div className="mt-4 rounded-md border border-neutral-200 p-3">
         <div className="mb-2 flex items-center justify-between">
           <div>
-            <h4 className="text-sm font-semibold text-neutral-700">Relationships / Joins (multi-table)</h4>
+            <h4 className="text-sm font-semibold text-neutral-700">Quan hệ / Joins (multi-table)</h4>
             <p className="text-xs text-neutral-500">
-              The base table is the primary-key attribute&apos;s table. Add a join to pull columns from
-              another table — <code>right.column</code> must be unique (N:1) unless you allow fan-out.
+              Bảng chính là bảng của thuộc tính khóa chính. Thêm join để kéo cột từ bảng phụ —
+              <code>Cột khóa phụ</code> phải duy nhất (N:1) trừ khi bật fan-out.
             </p>
           </div>
           <Button size="sm" variant="secondary" onClick={addJoin}>Add Join</Button>
         </div>
         {form.relationships.length === 0 ? (
-          <p className="text-xs text-neutral-400">No joins — single-table model.</p>
+          <p className="text-xs text-neutral-400">Chưa có join — model một bảng.</p>
         ) : (
           <div className="space-y-2">
-            {form.relationships.map((join, index) => (
-              <div key={index} className="grid items-end gap-2 rounded border border-neutral-100 p-2 md:grid-cols-12">
-                <Select
-                  label="Type"
-                  value={join.type}
-                  onChange={(event) => updateJoin(index, { type: event.target.value as TypeBJoin["type"] })}
-                  className="h-8 text-xs md:col-span-2"
-                >
-                  <option value="left">left</option>
-                  <option value="inner">inner</option>
-                </Select>
-                <Input
-                  label="Left table"
-                  placeholder={sourceTable || "base"}
-                  value={join.left.table}
-                  onChange={(event) => updateJoin(index, { left: { ...join.left, table: event.target.value.trim() } })}
-                  className="h-8 font-mono text-[11px] md:col-span-2"
-                />
-                <Input
-                  label="Left column"
-                  value={join.left.column}
-                  onChange={(event) => updateJoin(index, { left: { ...join.left, column: event.target.value.trim() } })}
-                  className="h-8 font-mono text-[11px] md:col-span-2"
-                />
-                <Input
-                  label="Right schema"
-                  value={join.right.schema}
-                  onChange={(event) => updateJoin(index, { right: { ...join.right, schema: event.target.value.trim() } })}
-                  className="h-8 font-mono text-[11px] md:col-span-1"
-                />
-                <Input
-                  label="Right table"
-                  value={join.right.table}
-                  onChange={(event) => updateJoin(index, { right: { ...join.right, table: event.target.value.trim() } })}
-                  className="h-8 font-mono text-[11px] md:col-span-2"
-                />
-                <Input
-                  label="Right column"
-                  value={join.right.column}
-                  onChange={(event) => updateJoin(index, { right: { ...join.right, column: event.target.value.trim() } })}
-                  className="h-8 font-mono text-[11px] md:col-span-2"
-                />
-                <label className="flex items-center gap-1 text-[11px] text-neutral-600 md:col-span-1">
-                  <input
-                    type="checkbox"
-                    checked={!!join.allow_fanout}
-                    onChange={(event) => updateJoin(index, { allow_fanout: event.target.checked })}
-                  />
-                  fan-out
-                </label>
-                <button
-                  type="button"
-                  title="Remove join"
-                  onClick={() => removeJoin(index)}
-                  className="h-8 rounded-md px-2 text-danger hover:bg-danger/10 md:col-span-1"
-                >
-                  Remove
-                </button>
-              </div>
-            ))}
+            {form.relationships.map((join, index) => {
+              const leftTable = join.left.table || sourceTable;
+              const leftColumns = columnsFor(resolveSchemaForTable(leftTable), leftTable);
+              const rightTables = tablesBySchema[join.right.schema] || (join.right.schema === sourceSchema ? tables : []);
+              const rightColumns = columnsFor(join.right.schema, join.right.table);
+              // Left table can be the base table or any OTHER join's right table (not this join's own).
+              const leftTableOptions = availableTables.filter(
+                (t) => !(t.schema === join.right.schema && t.table === join.right.table),
+              );
+              return (
+                <div key={index} className="flex flex-wrap items-end gap-2 rounded border border-neutral-100 p-2">
+                  <Select
+                    label="Type"
+                    value={join.type}
+                    onChange={(event) => updateJoin(index, { type: event.target.value as TypeBJoin["type"] })}
+                    className="h-8 min-w-[88px] text-xs"
+                  >
+                    <option value="left">left</option>
+                    <option value="inner">inner</option>
+                  </Select>
+                  <Select
+                    label="Bảng chính"
+                    value={join.left.table}
+                    onChange={(event) => updateJoin(index, { left: { table: event.target.value, column: "" } })}
+                    className="h-8 min-w-[180px] font-mono text-[11px]"
+                  >
+                    <option value="">{sourceTable ? `${sourceTable} (bảng chính)` : "- bảng chính -"}</option>
+                    {leftTableOptions.map((t) => (
+                      <option key={`${t.schema}.${t.table}`} value={t.table}>{t.table}</option>
+                    ))}
+                  </Select>
+                  <Select
+                    label="Cột khóa chính"
+                    value={join.left.column}
+                    onChange={(event) => updateJoin(index, { left: { ...join.left, column: event.target.value } })}
+                    className="h-8 min-w-[160px] font-mono text-[11px]"
+                  >
+                    <option value="">- cột khóa chính -</option>
+                    {leftColumns.map((column) => (
+                      <option key={column.column_name} value={column.column_name}>{column.column_name}</option>
+                    ))}
+                  </Select>
+                  <Select
+                    label="Schema (bảng phụ)"
+                    value={join.right.schema}
+                    onChange={(event) => updateJoin(index, { right: { schema: event.target.value, table: "", column: "" } })}
+                    className="h-8 min-w-[150px] font-mono text-[11px]"
+                  >
+                    <option value="">- schema -</option>
+                    {schemas.map((schema) => <option key={schema} value={schema}>{schema}</option>)}
+                  </Select>
+                  <Select
+                    label="Bảng phụ"
+                    value={join.right.table}
+                    onChange={(event) => updateJoin(index, { right: { ...join.right, table: event.target.value, column: "" } })}
+                    className="h-8 min-w-[180px] font-mono text-[11px]"
+                  >
+                    <option value="">- bảng phụ -</option>
+                    {rightTables.map((table) => (
+                      <option key={table.table_name} value={table.table_name}>{table.table_name}</option>
+                    ))}
+                  </Select>
+                  <Select
+                    label="Cột khóa phụ"
+                    value={join.right.column}
+                    onChange={(event) => updateJoin(index, { right: { ...join.right, column: event.target.value } })}
+                    className="h-8 min-w-[160px] font-mono text-[11px]"
+                  >
+                    <option value="">- cột khóa phụ -</option>
+                    {rightColumns.map((column) => (
+                      <option key={column.column_name} value={column.column_name}>{column.column_name}</option>
+                    ))}
+                  </Select>
+                  <label className="flex h-8 items-center gap-1 text-[11px] text-neutral-600">
+                    <input
+                      type="checkbox"
+                      checked={!!join.allow_fanout}
+                      onChange={(event) => updateJoin(index, { allow_fanout: event.target.checked })}
+                    />
+                    fan-out
+                  </label>
+                  <button
+                    type="button"
+                    title="Remove join"
+                    onClick={() => removeJoin(index)}
+                    className="h-8 rounded-md px-2 text-danger hover:bg-danger/10"
+                  >
+                    Remove
+                  </button>
+                </div>
+              );
+            })}
           </div>
         )}
       </div>
+    );
+  }
+
+  // B: one dropdown per attribute listing every column from the base table + joined tables as
+  // `table·column`. Picking it auto-fills source schema/table/column + data_type + name (editable).
+  function renderSourceColumnSelect(attribute: DataModelAttribute, index: number) {
+    const currentKey = sourceOptionKey(attribute.source_schema, attribute.source_table, attribute.source_column);
+    const known = sourceColumnOptions.some((o) => sourceOptionKey(o.schema, o.table, o.column) === currentKey);
+    return (
+      <Select
+        aria-label="Cột nguồn"
+        value={currentKey}
+        onChange={(event) => selectAttributeSource(index, event.target.value)}
+        className="h-8 w-full font-mono text-[11px]"
+      >
+        <option value="">- chọn cột nguồn -</option>
+        {/* Keep the current mapping visible even before its (joined) table's columns finish loading. */}
+        {currentKey && !known && (
+          <option value={currentKey}>
+            {`${attribute.source_table || sourceTable}·${attribute.source_column} (hiện tại)`}
+          </option>
+        )}
+        {sourceColumnOptions.map((o) => {
+          const key = sourceOptionKey(o.schema, o.table, o.column);
+          // Qualify the table with its schema when it differs from the base, so two same-named tables
+          // in different schemas stay distinguishable in the label (not just the value).
+          const tableLabel = o.schema && o.schema !== sourceSchema ? `${o.schema}.${o.table}` : o.table;
+          return <option key={key} value={key}>{`${tableLabel}·${o.column}`}</option>;
+        })}
+      </Select>
     );
   }
 
@@ -1658,7 +1887,7 @@ export default function DataModelsPage() {
           <col className="w-[170px]" />
           <col className="w-[190px]" />
           <col className="w-[130px]" />
-          {typeB && <col className="w-[260px]" />}
+          {typeB && <col className="w-[320px]" />}
           <col className="w-[80px]" />
           <col className="w-[80px]" />
           {!typeB && <col className="w-[220px]" />}
@@ -1669,7 +1898,7 @@ export default function DataModelsPage() {
             <TH>Attribute</TH>
             <TH>Display Name</TH>
             <TH>Data Type</TH>
-            {typeB && <TH>Source table / column</TH>}
+            {typeB && <TH>Cột nguồn (bảng·cột)</TH>}
             <TH className="text-center">Required</TH>
             <TH className="text-center">Primary</TH>
             {!typeB && <TH>Description</TH>}
@@ -1708,58 +1937,7 @@ export default function DataModelsPage() {
                   {ATTR_TYPES.map((type) => <option key={type} value={type}>{type}</option>)}
                 </Select>
               </TD>
-              {typeB && (
-                <TD>
-                  {/* Per-attribute source: blank table = the base table; set another table for a join
-                      column (prompt 38, multi-table). */}
-                  <div className="flex flex-col gap-1">
-                    <Input
-                      aria-label="Source table (blank = base)"
-                      placeholder={sourceTable ? `${sourceTable} (base)` : "base table"}
-                      value={attribute.source_table || ""}
-                      onChange={(event) => {
-                        const value = event.target.value.trim();
-                        updateAttribute(index, {
-                          source_table: value || undefined,
-                          source_schema: value ? attribute.source_schema || sourceSchema : undefined,
-                        });
-                      }}
-                      className="h-7 font-mono text-[11px]"
-                    />
-                    {!attribute.source_table || attribute.source_table === sourceTable ? (
-                      <Select
-                        aria-label="Source column"
-                        value={attribute.source_column || ""}
-                        onChange={(event) => {
-                          const source_column = event.target.value;
-                          updateAttribute(index, {
-                            source_column,
-                            source_schema: sourceSchema,
-                            source_table: sourceTable,
-                            data_type: sourceColumnType(source_column),
-                          });
-                        }}
-                        className="h-7 font-mono text-[11px]"
-                      >
-                        <option value="">- column -</option>
-                        {columns.map((column) => (
-                          <option key={column.column_name} value={column.column_name}>
-                            {column.column_name}
-                          </option>
-                        ))}
-                      </Select>
-                    ) : (
-                      <Input
-                        aria-label="Source column"
-                        placeholder="source_column"
-                        value={attribute.source_column || ""}
-                        onChange={(event) => updateAttribute(index, { source_column: event.target.value.trim() })}
-                        className="h-7 font-mono text-[11px]"
-                      />
-                    )}
-                  </div>
-                </TD>
-              )}
+              {typeB && <TD>{renderSourceColumnSelect(attribute, index)}</TD>}
               <TD className="text-center">
                 <input
                   type="checkbox"
@@ -1771,7 +1949,7 @@ export default function DataModelsPage() {
                 <input
                   type="radio"
                   name="primary_key_attribute"
-                  checked={!!attribute.is_primary_key || form.primary_key === attribute.name}
+                  checked={!!attribute.is_primary_key}
                   onChange={() => setPrimaryAttribute(index)}
                 />
               </TD>
