@@ -4,8 +4,12 @@ dm_* ``created_at``/``updated_at`` rows written BEFORE the timezone fix (prompt 
 wall-clock. This shifts them to local (VN) wall-clock by ``+hours`` (default 7). It is:
 
   * DRY-RUN by default (counts only, writes nothing);
-  * GUARDED by ``mdp_data._tz_backfill_log`` so it can never double-shift a table;
-  * REVERSIBLE (``reverse=True`` subtracts the hours and clears the guard);
+  * GUARDED by ``mdp_data._tz_backfill_log`` (table_name, shifted_hours, cutoff) so it can never
+    double-shift a table; the log records the apply params so REVERSE is faithful to them;
+  * REVERSIBLE for a WHOLE-TABLE apply (``reverse=True`` subtracts the LOGGED hours — not the CLI
+    ``--hours`` — and clears the guard). A ``--cutoff``-scoped apply is NOT cleanly reversible (after
+    +Δ the shifted rows overlap the unshifted [cutoff, cutoff+Δ) window, so no predicate can re-select
+    exactly the shifted set) → reverse REFUSES it (fail-closed) rather than corrupt post-fix rows;
   * scoped to ``mdp_data.dm_*`` only (system timestamptz tables are never touched);
   * NOT wired into any automatic path — an admin runs it manually after verifying the dry-run.
 
@@ -46,9 +50,12 @@ def _ensure_log_table(db: Session) -> None:
         text(
             f"CREATE TABLE IF NOT EXISTS {_LOG_TABLE} ("
             "table_name text PRIMARY KEY, shifted_hours integer NOT NULL, "
+            "cutoff text NULL, "  # the cutoff used by apply, so reverse is faithful to the apply
             "applied_at timestamptz NOT NULL DEFAULT now())"
         )
     )
+    # Forward-compat for a log table created before the cutoff column existed.
+    db.execute(text(f"ALTER TABLE {_LOG_TABLE} ADD COLUMN IF NOT EXISTS cutoff text NULL"))
 
 
 def _dm_tables(db: Session, only_tables: list[str] | None) -> list[str]:
@@ -86,48 +93,64 @@ def backfill_dm_timestamps(
     if not dry_run:
         _ensure_log_table(db)
 
-    done: set[str] = set()
+    # Load the FULL guard log (per-table apply params) so reverse is faithful to what apply did,
+    # independent of the CLI flags passed to the reverse invocation.
+    logged: dict[str, dict[str, Any]] = {}
     if _log_exists(db):
-        done = {r[0] for r in db.execute(text(f"SELECT table_name FROM {_LOG_TABLE}")).fetchall()}
+        for row in db.execute(
+            text(f"SELECT table_name, shifted_hours, cutoff FROM {_LOG_TABLE}")
+        ).mappings():
+            logged[row["table_name"]] = {"hours": int(row["shifted_hours"]), "cutoff": row["cutoff"]}
 
-    where = ""
-    params: dict[str, Any] = {"h": int(hours)}
+    fwd_where = ""
+    fwd_params: dict[str, Any] = {"h": int(hours)}
     if cutoff is not None:
-        where = " WHERE created_at < :cutoff"
-        params["cutoff"] = cutoff
+        fwd_where = " WHERE created_at < :cutoff"
+        fwd_params["cutoff"] = cutoff
 
     results: list[dict[str, Any]] = []
     total = 0
     for table in _dm_tables(db, only_tables):
         ref = f'"mdp_data"."{table}"'
-        already = table in done
         if reverse:
-            if not already:
+            entry = logged.get(table)
+            if entry is None:
                 results.append({"table": table, "rows": 0, "status": "skip (not backfilled)"})
                 continue
-            count = int(db.execute(text(f"SELECT count(*) FROM {ref}{where}"), params).scalar() or 0)
+            # A cutoff-scoped forward shift is NOT cleanly reversible: after +Δ, the shifted rows
+            # overlap the unshifted [cutoff, cutoff+Δ) window, so no created_at predicate can re-select
+            # exactly the shifted set. Refuse rather than corrupt the un-shifted (post-fix) rows.
+            if entry["cutoff"] is not None:
+                results.append({
+                    "table": table, "rows": 0,
+                    "status": f"REFUSED (apply used --cutoff {entry['cutoff']}; exact reverse impossible — restore from backup)",
+                })
+                continue
+            rev_hours = entry["hours"]  # use the LOGGED magnitude, never the CLI --hours
+            count = int(db.execute(text(f"SELECT count(*) FROM {ref}")).scalar() or 0)
             if not dry_run:
                 db.execute(text(
                     f"UPDATE {ref} SET created_at = created_at - make_interval(hours => :h), "
-                    f"updated_at = updated_at - make_interval(hours => :h){where}"
-                ), params)
+                    "updated_at = updated_at - make_interval(hours => :h)"
+                ), {"h": rev_hours})
                 db.execute(text(f"DELETE FROM {_LOG_TABLE} WHERE table_name = :t"), {"t": table})
-            results.append({"table": table, "rows": count, "status": "would reverse" if dry_run else "reversed"})
+            results.append({"table": table, "rows": count,
+                            "status": (f"would reverse -{rev_hours}h" if dry_run else f"reversed -{rev_hours}h")})
             total += count
         else:
-            if already:
+            if table in logged:
                 results.append({"table": table, "rows": 0, "status": "skip (already backfilled)"})
                 continue
-            count = int(db.execute(text(f"SELECT count(*) FROM {ref}{where}"), params).scalar() or 0)
+            count = int(db.execute(text(f"SELECT count(*) FROM {ref}{fwd_where}"), fwd_params).scalar() or 0)
             if not dry_run:
                 db.execute(text(
                     f"UPDATE {ref} SET created_at = created_at + make_interval(hours => :h), "
-                    f"updated_at = updated_at + make_interval(hours => :h){where}"
-                ), params)
+                    f"updated_at = updated_at + make_interval(hours => :h){fwd_where}"
+                ), fwd_params)
                 db.execute(text(
-                    f"INSERT INTO {_LOG_TABLE} (table_name, shifted_hours) VALUES (:t, :h) "
+                    f"INSERT INTO {_LOG_TABLE} (table_name, shifted_hours, cutoff) VALUES (:t, :h, :cutoff) "
                     "ON CONFLICT (table_name) DO NOTHING"
-                ), {"t": table, "h": int(hours)})
+                ), {"t": table, "h": int(hours), "cutoff": (str(cutoff) if cutoff is not None else None)})
             results.append({"table": table, "rows": count,
                             "status": (f"would shift +{hours}h" if dry_run else f"shifted +{hours}h")})
             total += count
