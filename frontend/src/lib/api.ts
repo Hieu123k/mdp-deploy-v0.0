@@ -63,21 +63,54 @@ export class ApiError extends Error {
   }
 }
 
-/** FastAPI errors are `{detail: string}` or `{detail: [{msg,...}]}` (validation). */
+/**
+ * Internal/FE routes return FastAPI errors `{detail: string}` or `{detail: [{msg,...}]}`.
+ * Integration routes (/inbound, /outbound) return the envelope `{code, message, data}`
+ * where validation errors live under `data.errors: [{field, msg}]`. Handle both so the
+ * human-readable cause is surfaced on either surface.
+ */
 function messageFromBody(data: unknown, fallback: string): string {
-  if (data && typeof data === "object" && "detail" in data) {
-    const d = (data as { detail: unknown }).detail;
-    if (typeof d === "string") return d;
-    if (Array.isArray(d)) {
-      return d
-        .map((e) => {
-          if (typeof e === "string") return e;
-          if (e && typeof e === "object" && "msg" in e)
-            return String((e as { msg: unknown }).msg);
-          return JSON.stringify(e);
-        })
-        .join("; ");
+  if (data && typeof data === "object") {
+    const o = data as Record<string, unknown>;
+    // FastAPI raw errors (internal/FE routes) — keep first so non-enveloped routes are unchanged.
+    if ("detail" in o) {
+      const d = o.detail;
+      if (typeof d === "string") return d;
+      if (Array.isArray(d)) {
+        return d
+          .map((e) => {
+            if (typeof e === "string") return e;
+            if (e && typeof e === "object" && "msg" in e)
+              return String((e as { msg: unknown }).msg);
+            return JSON.stringify(e);
+          })
+          .join("; ");
+      }
     }
+    // Envelope validation errors: {code:1005, message, data:{errors:[{field,msg}]}}
+    const envData = o.data;
+    if (
+      envData &&
+      typeof envData === "object" &&
+      Array.isArray((envData as { errors?: unknown }).errors)
+    ) {
+      const errs = (envData as { errors: unknown[] }).errors;
+      if (errs.length) {
+        return errs
+          .map((e) => {
+            if (e && typeof e === "object") {
+              const eo = e as Record<string, unknown>;
+              const field = typeof eo.field === "string" ? eo.field : "";
+              const msg = String(eo.msg ?? eo.message ?? JSON.stringify(e));
+              return field ? `${field}: ${msg}` : msg;
+            }
+            return String(e);
+          })
+          .join("; ");
+      }
+    }
+    // Envelope top-level human message: {code, message, data:null}
+    if (typeof o.message === "string" && o.message) return o.message;
   }
   return fallback;
 }

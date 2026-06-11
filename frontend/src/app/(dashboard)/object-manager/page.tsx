@@ -310,22 +310,36 @@ function TbStatusLine({ status }: { status: TbStatus | null }) {
   }
 }
 
-function errorMessages(error: unknown): ValidationMessage[] {
-  if (error instanceof ApiError && error.body && typeof error.body === "object" && "detail" in error.body) {
-    const detail = (error.body as { detail: unknown }).detail;
-    if (Array.isArray(detail)) {
-      return detail.map((item) => {
-        if (item && typeof item === "object") {
-          const record = item as Record<string, unknown>;
-          return {
-            field: String(record.field || record.loc || "error"),
-            message: String(record.message || record.msg || JSON.stringify(item)),
-          };
-        }
-        return { field: "error", message: String(item) };
-      });
+function fieldErrors(items: unknown[]): ValidationMessage[] {
+  return items.map((item) => {
+    if (item && typeof item === "object") {
+      const record = item as Record<string, unknown>;
+      return {
+        field: String(record.field || record.loc || "error"),
+        message: String(record.message || record.msg || JSON.stringify(item)),
+      };
     }
-    return [{ field: "error", message: String(detail) }];
+    return { field: "error", message: String(item) };
+  });
+}
+
+function errorMessages(error: unknown): ValidationMessage[] {
+  if (error instanceof ApiError && error.body && typeof error.body === "object") {
+    const body = error.body as Record<string, unknown>;
+    // Internal/FE routes: FastAPI {detail: string | [{msg,...}]}
+    if ("detail" in body) {
+      const detail = body.detail;
+      if (Array.isArray(detail)) return fieldErrors(detail);
+      return [{ field: "error", message: String(detail) }];
+    }
+    // Integration routes (/inbound, /outbound): envelope {code, message, data:{errors:[{field,msg}]}}
+    const envData = body.data;
+    if (envData && typeof envData === "object" && Array.isArray((envData as { errors?: unknown }).errors)) {
+      return fieldErrors((envData as { errors: unknown[] }).errors);
+    }
+    if (typeof body.message === "string" && body.message) {
+      return [{ field: "error", message: body.message }];
+    }
   }
   return [{ field: "error", message: error instanceof Error ? error.message : String(error) }];
 }
