@@ -272,6 +272,44 @@ function cellText(value: unknown): string {
   return String(value);
 }
 
+// Type B Validate/Preview status (prompt 40): a single inline line next to the footer buttons so a
+// click always shows feedback — fixing the "bấm không thấy gì" (nothing visible) gap where validate
+// success / preview result were never rendered in the create/edit drawer.
+type TbStatus =
+  | { kind: "validating" }
+  | { kind: "valid"; cols: number; warnings: number }
+  | { kind: "invalid"; errors: number }
+  | { kind: "previewing" }
+  | { kind: "preview"; rows: number }
+  | { kind: "error"; code: number };
+
+function tbStatusFromError(error: unknown): TbStatus {
+  return { kind: "error", code: error instanceof ApiError ? error.status : 0 };
+}
+
+function TbStatusLine({ status }: { status: TbStatus | null }) {
+  if (!status) return <span className="text-xs text-neutral-400">idle</span>;
+  switch (status.kind) {
+    case "validating":
+      return <span className="text-xs text-neutral-500">⏳ Validating…</span>;
+    case "valid":
+      return (
+        <span className="text-xs text-success">
+          ✓ Valid — {status.cols} column{status.cols === 1 ? "" : "s"}
+          {status.warnings > 0 ? <span className="text-warning"> (+{status.warnings} warning{status.warnings === 1 ? "" : "s"})</span> : null}
+        </span>
+      );
+    case "invalid":
+      return <span className="text-xs text-danger">✗ {status.errors} error{status.errors === 1 ? "" : "s"}</span>;
+    case "previewing":
+      return <span className="text-xs text-neutral-500">⏳ Previewing…</span>;
+    case "preview":
+      return <span className="text-xs text-success">✓ Preview — {status.rows} row{status.rows === 1 ? "" : "s"}</span>;
+    case "error":
+      return <span className="text-xs text-danger">✗ Error{status.code ? ` (HTTP ${status.code})` : ""}</span>;
+  }
+}
+
 function errorMessages(error: unknown): ValidationMessage[] {
   if (error instanceof ApiError && error.body && typeof error.body === "object" && "detail" in error.body) {
     const detail = (error.body as { detail: unknown }).detail;
@@ -371,6 +409,7 @@ export default function DataModelsPage() {
   const [validation, setValidation] = useState<TypeBValidationResult | null>(null);
   const [preview, setPreview] = useState<ModelPreview | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
+  const [tbStatus, setTbStatus] = useState<TbStatus | null>(null);
   const [confirm, setConfirm] = useState<DataModel | null>(null);
   const { user } = useAuth();
   const isAdmin = user?.role === "admin";
@@ -463,8 +502,14 @@ export default function DataModelsPage() {
     setWarnings([]);
     setValidation(null);
     setPreview(null);
+    setTbStatus(null);
     setNotice(null);
   }
+
+  // Any form edit invalidates a prior Validate/Preview result → back to "idle" so the status never lies.
+  useEffect(() => {
+    setTbStatus(null);
+  }, [form]);
 
   function patchForm(patch: Partial<FormState>) {
     setForm((current) => ({ ...current, ...patch }));
@@ -796,27 +841,29 @@ export default function DataModelsPage() {
     const localErrors = validateLocal(payload);
     if (localErrors.length) {
       setFormErrors(localErrors);
+      setTbStatus({ kind: "invalid", errors: localErrors.length });
       return false;
     }
     if (payload.type !== "B") {
       setFormErrors([]);
       setWarnings([]);
+      setTbStatus(null);
       return true;
     }
-    setSaving(true);
+    setTbStatus({ kind: "validating" });
     try {
       const result = await validateTypeBMapping(payload);
       setValidation(result);
       setWarnings(result.warnings || []);
       setFormErrors([]);
+      setTbStatus({ kind: "valid", cols: result.mapped_columns?.length ?? 0, warnings: (result.warnings || []).length });
       return true;
     } catch (error) {
       setValidation(null);
       setWarnings([]);
       setFormErrors(errorMessages(error));
+      setTbStatus(tbStatusFromError(error));
       return false;
-    } finally {
-      setSaving(false);
     }
   }
 
@@ -824,13 +871,16 @@ export default function DataModelsPage() {
     const ok = await runValidate();
     if (!ok) return;
     setPreviewLoading(true);
+    setTbStatus({ kind: "previewing" });
     try {
       const result = await previewTypeBMapping(buildPayload(), 20);
       setPreview(result);
       setWarnings(result.warnings || []);
+      setTbStatus({ kind: "preview", rows: result.count ?? previewRows(result).length });
     } catch (error) {
       setPreview(null);
       setFormErrors(errorMessages(error));
+      setTbStatus(tbStatusFromError(error));
     } finally {
       setPreviewLoading(false);
     }
@@ -1100,9 +1150,20 @@ export default function DataModelsPage() {
               <Button variant="ghost" onClick={() => setMode(null)}>Cancel</Button>
               {form.type === "B" && (
                 <>
-                  <Button variant="secondary" onClick={runValidate} disabled={saving}>Validate Mapping</Button>
-                  <Button variant="secondary" onClick={runUnsavedPreview} disabled={saving || previewLoading}>
-                    {previewLoading ? "Previewing..." : "Preview Mapping"}
+                  <span className="mr-auto flex items-center pl-1"><TbStatusLine status={tbStatus} /></span>
+                  <Button
+                    variant="secondary"
+                    onClick={runValidate}
+                    disabled={saving || tbStatus?.kind === "validating" || tbStatus?.kind === "previewing"}
+                  >
+                    {tbStatus?.kind === "validating" ? "Validating…" : "Validate Mapping"}
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    onClick={runUnsavedPreview}
+                    disabled={saving || previewLoading || tbStatus?.kind === "validating" || tbStatus?.kind === "previewing"}
+                  >
+                    {tbStatus?.kind === "previewing" || previewLoading ? "Previewing…" : "Preview Mapping"}
                   </Button>
                 </>
               )}
