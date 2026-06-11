@@ -95,6 +95,41 @@ def test_ev5_outbound_error_envelope(client: TestClient, auth_headers: dict[str,
     assert missing.json()["data"] is None
 
 
+def test_ev7_router_level_errors_on_integration_paths_are_enveloped(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    # 405 / unrouted-404 are raised by Starlette BEFORE the route handler, so they bypass
+    # EnvelopeRoute. The app-level backstop re-wraps them for the integration surface.
+    # Wrong method on /inbound (only POST defined) → 405 enveloped (405 → 4xx fallback 1001).
+    wrong_method_in = client.get("/inbound/invoice", headers=auth_headers)
+    assert wrong_method_in.status_code == 405
+    body = wrong_method_in.json()
+    assert set(body) == {"code", "message", "data"}
+    assert body["code"] == 1001
+    assert body["data"] is None
+    # Wrong method on /outbound (only GET defined) → 405 enveloped.
+    wrong_method_out = client.post("/outbound/invoice", headers=auth_headers, json={})
+    assert wrong_method_out.status_code == 405
+    assert wrong_method_out.json()["code"] == 1001
+    assert wrong_method_out.json()["data"] is None
+    # Unrouted path under the integration prefix → 404 enveloped.
+    unrouted = client.get("/inbound", headers=auth_headers)
+    assert unrouted.status_code == 404
+    assert unrouted.json()["code"] == 1004
+    assert unrouted.json()["data"] is None
+
+
+def test_ev7b_router_level_errors_on_internal_paths_stay_raw(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    # Non-regression: the same backstop must NOT touch internal/FE routes — a 405 there keeps
+    # FastAPI's raw {detail} shape (no envelope), so the frontend is unaffected.
+    wrong_method = client.post("/health")
+    assert wrong_method.status_code == 405
+    assert "code" not in wrong_method.json()
+    assert wrong_method.json()["detail"] == "Method Not Allowed"
+
+
 def test_ev6_internal_endpoints_are_not_enveloped(client: TestClient, auth_headers: dict[str, str]) -> None:
     # EV6 / FE non-regression: internal/FE routes keep their RAW shape (no {code,message,data}).
     models = client.get("/data-models", headers=auth_headers)

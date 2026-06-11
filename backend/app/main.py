@@ -2,8 +2,15 @@ import logging
 from contextlib import asynccontextmanager
 from collections.abc import AsyncGenerator
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.exception_handlers import (
+    http_exception_handler,
+    request_validation_exception_handler,
+)
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api.admin_demo import router as admin_demo_router
 from app.api.api_keys import router as api_keys_router
@@ -24,6 +31,11 @@ from app.api.roles import router as roles_router
 from app.api.streaming import router as streaming_router
 from app.api.transactions import router as transactions_router
 from app.api.users import router as users_router
+from app.api.envelope import (
+    envelope_from_http_exception,
+    envelope_from_validation_error,
+    is_integration_path,
+)
 from app.core.config import settings
 from app.db.session import SessionLocal
 from app.services.source_count_refresher import SourceCountRefresher
@@ -102,3 +114,27 @@ app.include_router(transactions_router)
 app.include_router(preferences_router)
 app.include_router(roles_router)
 app.include_router(streaming_router)
+
+
+# --- Integration-API envelope: app-level backstop (prompt 41) -------------------------------
+# EnvelopeRoute wraps everything raised INSIDE an inbound/outbound handler. Router-originated
+# errors (405 Method Not Allowed, unrouted 404) are raised by Starlette BEFORE the route is
+# dispatched, so they bypass EnvelopeRoute. These handlers re-wrap them — but ONLY for the
+# integration paths; every internal/FE route delegates to FastAPI's default handler so its raw
+# {detail}/422 shape is preserved (EV6 non-regression contract).
+@app.exception_handler(StarletteHTTPException)
+async def _integration_http_exception_handler(
+    request: Request, exc: StarletteHTTPException
+) -> Response:
+    if is_integration_path(request.url.path):
+        return envelope_from_http_exception(exc)
+    return await http_exception_handler(request, exc)
+
+
+@app.exception_handler(RequestValidationError)
+async def _integration_validation_exception_handler(
+    request: Request, exc: RequestValidationError
+) -> Response:
+    if is_integration_path(request.url.path):
+        return envelope_from_validation_error(exc)
+    return await request_validation_exception_handler(request, exc)

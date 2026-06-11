@@ -21,6 +21,16 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 logger = logging.getLogger("mdp.envelope")
 
+# The integration surface, in ONE place. The routers carry these prefixes and the app-level
+# exception handlers (main.py) re-use this to scope router-originated errors (405, unrouted 404)
+# that never reach EnvelopeRoute, while leaving every internal/FE route's raw shape untouched.
+INTEGRATION_PREFIXES = ("/inbound", "/outbound")
+
+
+def is_integration_path(path: str) -> bool:
+    """True only for the integration routers' own paths (exact prefix or a sub-path of it)."""
+    return any(path == p or path.startswith(p + "/") for p in INTEGRATION_PREFIXES)
+
 
 class EnvelopeCode(IntEnum):
     """The ONE place the integration response codes live."""
@@ -98,6 +108,11 @@ def envelope_from_http_exception(exc: StarletteHTTPException) -> JSONResponse:
         for key, value in exc.headers.items():
             response.headers[key] = value
     return response
+
+
+def envelope_from_validation_error(exc: RequestValidationError) -> JSONResponse:
+    """Envelope a request-validation error → ``{code:1005, message, data:{errors:[{field,msg}]}}``."""
+    return _json_envelope(422, "Validation error", errors=[_normalize_error(e) for e in exc.errors()])
 
 
 def _wrap_success(response: Response) -> Response:
