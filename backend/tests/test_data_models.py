@@ -398,7 +398,7 @@ def test_update_does_not_alter_generated_table(
 def test_create_generated_table_sql_has_system_and_attribute_columns() -> None:
     class Result:
         def scalar(self):
-            return False
+            return True  # pg_timezone_names existence check (prompt 39) → tz is valid
 
     class Dialect:
         name = "postgresql"
@@ -436,8 +436,9 @@ def test_create_generated_table_sql_has_system_and_attribute_columns() -> None:
     assert generated_table == "mdp_data.dm_invoice"
     assert '"id" UUID PRIMARY KEY' in ddl
     assert '"raw_payload" JSONB NULL' in ddl
-    assert '"created_at" TIMESTAMP DEFAULT now()' in ddl
-    assert '"updated_at" TIMESTAMP DEFAULT now()' in ddl
+    # Prompt 39: dm_* timestamps store local (VN) wall-clock — naive TIMESTAMP, tz-shifted default.
+    assert '"created_at" TIMESTAMP DEFAULT (now() AT TIME ZONE \'Asia/Ho_Chi_Minh\')' in ddl
+    assert '"updated_at" TIMESTAMP DEFAULT (now() AT TIME ZONE \'Asia/Ho_Chi_Minh\')' in ddl
     assert '"invoice_no" TEXT' in ddl
     assert '"quantity" INTEGER' in ddl
     assert '"amount" DOUBLE PRECISION' in ddl
