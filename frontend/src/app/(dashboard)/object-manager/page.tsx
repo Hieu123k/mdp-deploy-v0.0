@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ClipboardList, Eye, Pencil, Power, RotateCcw, TableProperties, Trash2 } from "lucide-react";
 import { useAuth } from "@/components/auth/AuthProvider";
 import { PageHeader } from "@/components/layout/PageHeader";
@@ -506,9 +506,15 @@ export default function DataModelsPage() {
     setNotice(null);
   }
 
-  // Any form edit invalidates a prior Validate/Preview result → back to "idle" so the status never lies.
+  // Any form edit invalidates a prior Validate/Preview result → drop the status AND the now-stale
+  // inline preview/validation, and bump the request generation so an in-flight response can't
+  // overwrite the freshly-idle status.
+  const tbGenRef = useRef(0);
   useEffect(() => {
+    tbGenRef.current += 1;
     setTbStatus(null);
+    setPreview(null);
+    setValidation(null);
   }, [form]);
 
   function patchForm(patch: Partial<FormState>) {
@@ -850,15 +856,18 @@ export default function DataModelsPage() {
       setTbStatus(null);
       return true;
     }
+    const gen = tbGenRef.current;
     setTbStatus({ kind: "validating" });
     try {
       const result = await validateTypeBMapping(payload);
+      if (gen !== tbGenRef.current) return false; // a form edit invalidated this request
       setValidation(result);
       setWarnings(result.warnings || []);
       setFormErrors([]);
       setTbStatus({ kind: "valid", cols: result.mapped_columns?.length ?? 0, warnings: (result.warnings || []).length });
       return true;
     } catch (error) {
+      if (gen !== tbGenRef.current) return false;
       setValidation(null);
       setWarnings([]);
       setFormErrors(errorMessages(error));
@@ -870,17 +879,21 @@ export default function DataModelsPage() {
   async function runUnsavedPreview() {
     const ok = await runValidate();
     if (!ok) return;
+    const gen = tbGenRef.current;
     setPreviewLoading(true);
     setTbStatus({ kind: "previewing" });
     try {
       const result = await previewTypeBMapping(buildPayload(), 20);
+      if (gen !== tbGenRef.current) return; // a form edit invalidated this request
       setPreview(result);
       setWarnings(result.warnings || []);
       setTbStatus({ kind: "preview", rows: result.count ?? previewRows(result).length });
     } catch (error) {
-      setPreview(null);
-      setFormErrors(errorMessages(error));
-      setTbStatus(tbStatusFromError(error));
+      if (gen === tbGenRef.current) {
+        setPreview(null);
+        setFormErrors(errorMessages(error));
+        setTbStatus(tbStatusFromError(error));
+      }
     } finally {
       setPreviewLoading(false);
     }
@@ -1167,7 +1180,12 @@ export default function DataModelsPage() {
                   </Button>
                 </>
               )}
-              <Button onClick={saveModel} disabled={saving}>{saving ? "Saving..." : mode === "edit" ? "Save Changes" : "Save Model"}</Button>
+              <Button
+                onClick={saveModel}
+                disabled={saving || tbStatus?.kind === "validating" || tbStatus?.kind === "previewing"}
+              >
+                {saving ? "Saving..." : mode === "edit" ? "Save Changes" : "Save Model"}
+              </Button>
             </>
           )
         }

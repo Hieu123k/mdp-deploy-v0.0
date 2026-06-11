@@ -49,13 +49,21 @@ export default function ApiKeysPage() {
   const [dirs, setDirs] = useState<string[]>(["outbound"]);
   const [models, setModels] = useState<string[]>([]);
   const [allModels, setAllModels] = useState<DataModel[]>([]);
+  const [modelsErr, setModelsErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [formErr, setFormErr] = useState<string | null>(null);
 
   // Populate the "Allowed models" multi-select (prompt 40: explicit allow-list, no more blank=all).
-  useEffect(() => {
-    listDataModels().then(setAllModels).catch(() => {});
+  // Surface load failures (an empty list would otherwise leave every new key unscopable with no hint).
+  const loadModels = useCallback(() => {
+    setModelsErr(null);
+    listDataModels()
+      .then(setAllModels)
+      .catch((e) => setModelsErr(e instanceof ApiError ? e.message : "Could not load data models"));
   }, []);
+  useEffect(() => {
+    loadModels();
+  }, [loadModels]);
 
   function openNew() {
     setName("");
@@ -63,6 +71,7 @@ export default function ApiKeysPage() {
     setDirs(["outbound"]);
     setModels([]);
     setFormErr(null);
+    loadModels(); // refresh so models created since page load appear in the dropdown
     setOpen(true);
   }
   function toggleModel(modelName: string) {
@@ -160,7 +169,13 @@ export default function ApiKeysPage() {
                         ))}
                       </div>
                     </TD>
-                    <TD className="text-xs">{k.allowed_models?.join(", ") || "all"}</TD>
+                    <TD className="text-xs">
+                      {k.allowed_models && k.allowed_models.length ? (
+                        k.allowed_models.join(", ")
+                      ) : (
+                        <Badge tone="warning">none — no access</Badge>
+                      )}
+                    </TD>
                     <TD>
                       <Badge tone={k.is_active ? "success" : "neutral"}>
                         {k.is_active ? "active" : "disabled"}
@@ -221,6 +236,7 @@ export default function ApiKeysPage() {
           </div>
           <div>
             <span className="mb-1 block text-sm text-neutral-700">Allowed models</span>
+            {modelsErr && <p className="mb-1 text-xs text-danger">{modelsErr}</p>}
             <Select
               aria-label="Add allowed model"
               value=""
