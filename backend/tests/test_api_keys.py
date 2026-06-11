@@ -69,7 +69,8 @@ def test_valid_api_key_can_call_inbound(
     db_session: Session,
 ) -> None:
     create_invoice_model_and_table(client, auth_headers, db_session)
-    api_key = create_external_api_key(client, auth_headers)["api_key"]
+    # Prompt 40: allowed_models is an explicit allow-list — scope the key to the model it uses.
+    api_key = create_external_api_key(client, auth_headers, models=["invoice"])["api_key"]
 
     response = client.post(
         "/inbound/invoice",
@@ -91,7 +92,7 @@ def test_valid_api_key_can_call_outbound(
         headers=auth_headers,
         json={"invoice_no": "INV-001", "amount": 98.5},
     )
-    api_key = create_external_api_key(client, auth_headers)["api_key"]
+    api_key = create_external_api_key(client, auth_headers, models=["invoice"])["api_key"]
 
     response = client.get("/outbound/invoice", headers={"X-API-Key": api_key})
 
@@ -234,6 +235,7 @@ def test_transaction_log_records_auth_type_and_source_system(
     created = create_external_api_key(
         client,
         auth_headers,
+        models=["invoice"],  # prompt 40: explicit allow-list
         source_system="QMS",
     )
 
@@ -251,3 +253,29 @@ def test_transaction_log_records_auth_type_and_source_system(
     assert transaction["auth_type"] == "api_key"
     assert transaction["api_key_id"] == created["id"]
     assert transaction["source_system"] == "QMS"
+
+
+def test_ak1_empty_allowed_models_rejects_all(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    db_session: Session,
+) -> None:
+    # Prompt 40 (AK1): an empty/NULL allowed_models grants NO model (was "blank = all"). The key is
+    # created fine but can't be used until it is scoped to a model.
+    create_invoice_model_and_table(client, auth_headers, db_session)
+    created = create_external_api_key(client, auth_headers, models=None)
+    assert created["allowed_models"] in (None, [])  # created OK, just unscoped
+    response = client.get("/outbound/invoice", headers={"X-API-Key": created["api_key"]})
+    assert response.status_code == 403
+
+
+def test_ak2_multi_model_allow_list_grants_listed_model(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    db_session: Session,
+) -> None:
+    # Prompt 40 (AK2): a key scoped to several models can use any model in its list.
+    create_invoice_model_and_table(client, auth_headers, db_session)
+    api_key = create_external_api_key(client, auth_headers, models=["invoice", "supplier"])["api_key"]
+    response = client.get("/outbound/invoice", headers={"X-API-Key": api_key})
+    assert response.status_code == 200

@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 import { Modal } from "@/components/ui/Modal";
 import { Input } from "@/components/ui/Input";
+import { Select } from "@/components/ui/Select";
 import { Table, THead, TBody, TR, TH, TD } from "@/components/ui/Table";
 import {
   API_DIRECTIONS,
@@ -15,8 +16,10 @@ import {
   createApiKey,
   deleteApiKey,
   listApiKeys,
+  listDataModels,
   updateApiKey,
   type ApiKey,
+  type DataModel,
 } from "@/lib/api";
 
 export default function ApiKeysPage() {
@@ -44,17 +47,26 @@ export default function ApiKeysPage() {
   const [name, setName] = useState("");
   const [source, setSource] = useState("");
   const [dirs, setDirs] = useState<string[]>(["outbound"]);
-  const [models, setModels] = useState("");
+  const [models, setModels] = useState<string[]>([]);
+  const [allModels, setAllModels] = useState<DataModel[]>([]);
   const [busy, setBusy] = useState(false);
   const [formErr, setFormErr] = useState<string | null>(null);
+
+  // Populate the "Allowed models" multi-select (prompt 40: explicit allow-list, no more blank=all).
+  useEffect(() => {
+    listDataModels().then(setAllModels).catch(() => {});
+  }, []);
 
   function openNew() {
     setName("");
     setSource("");
     setDirs(["outbound"]);
-    setModels("");
+    setModels([]);
     setFormErr(null);
     setOpen(true);
+  }
+  function toggleModel(modelName: string) {
+    setModels((cur) => (cur.includes(modelName) ? cur.filter((x) => x !== modelName) : [...cur, modelName]));
   }
   function toggleDir(d: string) {
     setDirs((cur) => (cur.includes(d) ? cur.filter((x) => x !== d) : [...cur, d]));
@@ -72,9 +84,8 @@ export default function ApiKeysPage() {
     }
     setBusy(true);
     try {
-      const allowed_models = models.trim()
-        ? models.split(",").map((s) => s.trim()).filter(Boolean)
-        : null;
+      // Empty selection → null = NO model (prompt 40). The key is created but unusable until scoped.
+      const allowed_models = models.length ? models : null;
       const res = await createApiKey({
         name: name.trim(),
         source_system: source.trim() || undefined,
@@ -208,12 +219,49 @@ export default function ApiKeysPage() {
               ))}
             </div>
           </div>
-          <Input
-            label="Allowed models (comma-separated; blank = all)"
-            value={models}
-            onChange={(e) => setModels(e.target.value)}
-            placeholder="demo_supplier, demo_widget"
-          />
+          <div>
+            <span className="mb-1 block text-sm text-neutral-700">Allowed models</span>
+            <Select
+              aria-label="Add allowed model"
+              value=""
+              onChange={(e) => {
+                if (e.target.value) toggleModel(e.target.value);
+              }}
+            >
+              <option value="">+ add a data model…</option>
+              {allModels
+                .filter((m) => !models.includes(m.name))
+                .map((m) => (
+                  <option key={m.id} value={m.name}>
+                    {m.name}
+                    {m.display_name ? ` — ${m.display_name}` : ""}
+                  </option>
+                ))}
+            </Select>
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {models.length === 0 ? (
+                <span className="text-xs text-warning">
+                  No models selected — this key cannot access any model until you add one.
+                </span>
+              ) : (
+                models.map((m) => (
+                  <Badge key={m} tone="info">
+                    <span className="inline-flex items-center gap-1">
+                      {m}
+                      <button
+                        type="button"
+                        aria-label={`Remove ${m}`}
+                        className="leading-none hover:text-danger"
+                        onClick={() => toggleModel(m)}
+                      >
+                        ×
+                      </button>
+                    </span>
+                  </Badge>
+                ))
+              )}
+            </div>
+          </div>
         </div>
       </Modal>
 

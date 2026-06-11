@@ -140,6 +140,8 @@ def enforce_api_key_scope(
         return
     if direction not in (auth_context.allowed_directions or []):
         raise ApiKeyScopeError(f"API key is not allowed for {direction}")
+    # Allowed-models is now an EXPLICIT allow-list (prompt 40): an empty/NULL scope grants NO model
+    # (was previously "blank = all"). A key must be scoped to the models it may use before it works.
     allowed_models = auth_context.allowed_models or []
-    if allowed_models and model_name not in allowed_models:
+    if not allowed_models or model_name not in allowed_models:
         raise ApiKeyScopeError(f"API key is not allowed for model {model_name}")
