@@ -172,7 +172,10 @@ class DataModelBase(BaseModel):
 
 
 class DataModelCreate(DataModelBase):
-    pass
+    # Type B "latest version only" dedup. Input-only here; persisted ADDITIVELY inside the
+    # ``relationships`` JSON (no new DB column) and surfaced back as derived fields on read.
+    latest_only: bool = False
+    recency_column: str | None = Field(default=None, max_length=150)
 
 
 class DataModelUpdate(BaseModel):
@@ -198,6 +201,8 @@ class DataModelUpdate(BaseModel):
     sensitivity_level: str | None = Field(default=None, max_length=50)
     ai_enabled: bool | None = None
     status: str | None = Field(default=None, max_length=50)
+    latest_only: bool | None = None
+    recency_column: str | None = Field(default=None, max_length=150)
 
     @model_validator(mode="after")
     def validate_partial_names(self) -> "DataModelUpdate":
@@ -237,6 +242,26 @@ class DataModelRead(DataModelBase):
             if attribute.source_table is not None
         }
         return values.pop() if len(values) == 1 else None
+
+    def _latest_config(self) -> dict[str, Any] | None:
+        # The dedup config lives as one ``{"type": "latest_config", ...}`` entry in the SHARED
+        # relationships JSON (no dedicated column) - surface it so Edit can restore the toggle.
+        for relationship in self.relationships or []:
+            if isinstance(relationship, dict) and relationship.get("type") == "latest_config":
+                return relationship
+        return None
+
+    @computed_field
+    @property
+    def latest_only(self) -> bool:
+        config = self._latest_config()
+        return bool(config.get("latest_only")) if config else False
+
+    @computed_field
+    @property
+    def recency_column(self) -> str | None:
+        config = self._latest_config()
+        return config.get("recency_column") if config else None
 
 
 class DataModelTemplateRead(BaseModel):

@@ -115,6 +115,9 @@ type FormState = {
   status: string;
   attributes: DataModelAttribute[];
   relationships: TypeBJoin[];
+  // Type B "latest version only" dedup (prompt 50). recency_column matters only when latest_only.
+  latest_only: boolean;
+  recency_column: string;
 };
 
 type TemplateForm = {
@@ -174,6 +177,8 @@ function initialForm(): FormState {
     // M (prompt 46): Type A & Type B both start with an EMPTY placeholder attribute (no seeded "code").
     attributes: [emptyAttribute(true)],
     relationships: [],
+    latest_only: false,
+    recency_column: "updated_at",
   };
 }
 
@@ -222,7 +227,13 @@ function formFromModel(model: DataModel): FormState {
       ...attribute,
       is_primary_key: model.primary_key ? attribute.name === model.primary_key : !!attribute.is_primary_key,
     })),
-    relationships: (model.relationships || []).map((join) => ({ ...join })),
+    // The relationships column is SHARED: drop the non-join "latest_config" entry (prompt 50) so it
+    // never renders as a phantom join row - it is restored via latest_only/recency_column instead.
+    relationships: (model.relationships || [])
+      .filter((join) => join && (join.left != null || join.right != null))
+      .map((join) => ({ ...join })),
+    latest_only: !!model.latest_only,
+    recency_column: model.recency_column || "updated_at",
   };
 }
 
@@ -895,6 +906,14 @@ export default function DataModelsPage() {
       ai_enabled: form.ai_enabled,
       status: form.status || "active",
       attributes,
+      // Type B dedup (prompt 50). Send the boolean for Type B so toggling OFF on edit clears the
+      // saved config; recency only matters when ON. OFF persists no config -> old behaviour intact.
+      ...(form.type === "B"
+        ? {
+            latest_only: form.latest_only,
+            recency_column: form.latest_only ? form.recency_column || "updated_at" : null,
+          }
+        : {}),
     };
   }
 
@@ -955,6 +974,10 @@ export default function DataModelsPage() {
         });
       }
     });
+    // Prompt 50: "Latest version only" requires a recency column (the red-* required field).
+    if (payload.type === "B" && form.latest_only && !form.recency_column) {
+      errors.push({ field: "recency_column", message: "Recency column is required when Latest version only is on." });
+    }
     return errors;
   }
 
@@ -1870,7 +1893,60 @@ export default function DataModelsPage() {
         </div>
         {renderAttributesTable(true)}
         {renderRelationshipsEditor()}
+        {renderLatestVersionEditor()}
       </DrawerSection>
+    );
+  }
+
+  // S (prompt 50): "Latest version only" toggle. ON wraps each source relation in a newest-row-per-key
+  // dedup on the backend; the recency column (a required, red-* field) is what "newest" sorts by.
+  function setLatestOnly(checked: boolean) {
+    setForm((current) => {
+      let recency = current.recency_column;
+      if (checked && !recency) {
+        recency = columns.some((c) => c.column_name === "updated_at") ? "updated_at" : "";
+      }
+      return { ...current, latest_only: checked, recency_column: recency };
+    });
+  }
+
+  function renderLatestVersionEditor() {
+    return (
+      <div className="mt-4 rounded-md border border-neutral-200 p-3">
+        <label className="flex items-center gap-2 text-sm font-medium text-neutral-700">
+          <input
+            type="checkbox"
+            aria-label="Latest version only"
+            checked={form.latest_only}
+            onChange={(event) => setLatestOnly(event.target.checked)}
+          />
+          Latest version only (deduplicate by key)
+        </label>
+        <p className="mt-1 text-xs text-neutral-500">
+          Keeps the newest row per key using the selected column.
+        </p>
+        {form.latest_only && (
+          <div className="mt-2 max-w-xs">
+            <Select
+              label="Recency column"
+              requiredMark
+              aria-label="Recency column"
+              value={form.recency_column}
+              onChange={(event) => setForm((current) => ({ ...current, recency_column: event.target.value }))}
+              className={cn("h-9 font-mono text-xs", form.recency_column ? "" : "text-neutral-400")}
+            >
+              <option value="" disabled>- Select column -</option>
+              {/* Keep the saved recency column selectable before the base columns finish loading on Edit. */}
+              {form.recency_column && !columns.some((c) => c.column_name === form.recency_column) && (
+                <option value={form.recency_column}>{`${form.recency_column} (current)`}</option>
+              )}
+              {columns.map((column) => (
+                <option key={column.column_name} value={column.column_name}>{column.column_name}</option>
+              ))}
+            </Select>
+          </div>
+        )}
+      </div>
     );
   }
 

@@ -134,6 +134,47 @@ def _primary_key_null_count(
 
 ALLOWED_JOIN_TYPES = {"left", "inner"}
 
+# Type B "latest version only" dedup config. Persisted ADDITIVELY as one entry inside the SHARED
+# ``relationships`` JSON (no new DB column) - the join planner ignores it (it has no left/right).
+LATEST_CONFIG_TYPE = "latest_config"
+DEFAULT_RECENCY_COLUMN = "updated_at"
+# Recency must be orderable "newest-first": a timestamp/date or a number. text/boolean/json/uuid
+# are rejected so a silently-meaningless sort can't slip through.
+SORTABLE_RECENCY_TYPES = {"integer", "float", "date", "datetime"}
+
+
+def _is_sortable_recency(data_type: str) -> bool:
+    return _normalize_postgres_type(data_type) in SORTABLE_RECENCY_TYPES
+
+
+def _read_latest_config(relationships: list[dict[str, Any]] | None) -> tuple[bool, str | None]:
+    """Pull the persisted ``latest_config`` entry out of the SHARED relationships JSON. Returns
+    ``(latest_only, recency_column)`` - the source of truth for saved-model reload / outbound."""
+    for rel in (relationships or []):
+        if isinstance(rel, dict) and rel.get("type") == LATEST_CONFIG_TYPE:
+            return bool(rel.get("latest_only")), rel.get("recency_column")
+    return False, None
+
+
+def _extract_latest_config(
+    data_model_in: DataModelCreate, *, allow_relationship_fallback: bool = True
+) -> tuple[bool, str | None]:
+    """Resolve the dedup config from a payload.
+
+    On create/edit the explicit top-level fields are the SOLE source of truth
+    (``allow_relationship_fallback=False``): a stale ``latest_config`` entry left in the inbound
+    ``relationships`` JSON must NOT resurrect ``latest_only=True``, or validation would skip the
+    PK/fan-out guards for a model that persistence stores WITHOUT dedup (validation/persistence
+    divergence). Only the saved-model reconstruction paths (outbound + mapped-preview), which carry
+    no top-level field, opt into the relationships fallback so a saved deduped model still dedups."""
+    latest_only = bool(getattr(data_model_in, "latest_only", False))
+    recency_column = getattr(data_model_in, "recency_column", None)
+    if allow_relationship_fallback and (not latest_only or not recency_column):
+        rel_latest, rel_recency = _read_latest_config(data_model_in.relationships)
+        latest_only = latest_only or rel_latest
+        recency_column = recency_column or rel_recency
+    return latest_only, recency_column
+
 
 def _q(identifier: str) -> str:
     """Double-quote an identifier. Callers MUST have ``validate_identifier``-d it first (the pattern
@@ -145,6 +186,32 @@ def _quoted_table_ref(schema_name: str, table_name: str, dialect_name: str) -> s
     if dialect_name == "postgresql":
         return f"{_q(schema_name)}.{_q(table_name)}"
     return _q(table_name)
+
+
+def _dedup_relation_sql(
+    schema_name: str,
+    table_name: str,
+    *,
+    dedup_key: str,
+    recency: str,
+    tiebreak: str | None,
+    dialect_name: str,
+) -> str:
+    """A "latest row per key" subquery that replaces a raw table reference when ``latest_only`` is
+    on. Every identifier here was ``validate_identifier``-d upstream (PK/join columns, recency,
+    schema/table), so ``_q`` quoting is injection-safe. Postgres -> DISTINCT ON; other dialects
+    (the sqlite test bind) -> an equivalent ROW_NUMBER window so the dedup is portable."""
+    ref = _quoted_table_ref(schema_name, table_name, dialect_name)
+    dk, rec = _q(dedup_key), _q(recency)
+    tb = f", {_q(tiebreak)} DESC" if tiebreak else ""
+    if dialect_name == "postgresql":
+        return f"(SELECT DISTINCT ON ({dk}) * FROM {ref} ORDER BY {dk}, {rec} DESC NULLS LAST{tb})"
+    # sqlite: NULLs already sort last under DESC; ROW_NUMBER needs sqlite >= 3.25.
+    rn = _q("_mdp_rn")
+    return (
+        f"(SELECT * FROM (SELECT *, ROW_NUMBER() OVER "
+        f"(PARTITION BY {dk} ORDER BY {rec} DESC{tb}) AS {rn} FROM {ref}) WHERE {rn} = 1)"
+    )
 
 
 def _column_not_unique(db: Session, schema: str, table: str, column: str) -> bool:
@@ -171,6 +238,7 @@ def _resolve_join_plan(
     base: tuple[str, str],
     errors: list[dict[str, str]],
     warnings: list[dict[str, str]],
+    latest_only: bool = False,
 ) -> dict[str, Any] | None:
     """Validate the relationships/joins and return a join plan, or ``None`` for a single-table model.
 
@@ -290,6 +358,10 @@ def _resolve_join_plan(
                         f"vs {p['rt']}.{p['rc']} ({rci['data_type']})"
                     ),
                 })
+            # latest_only wraps the right table in DISTINCT ON (rc) -> rc IS unique in the deduped
+            # subquery, so the fan-out guard no longer applies. Type-match above still enforced.
+            elif latest_only:
+                pass
             elif _column_not_unique(db, p["right_st"][0], p["right_st"][1], p["rc"]):
                 if p["allow_fanout"]:
                     warnings.append({
@@ -386,7 +458,25 @@ def build_type_b_from_clause(
     dialect = _dialect_name(db)
     base = (validation["source_schema"], validation["source_table"])
     plan = validation.get("join_plan")
-    from_sql = f"{_quoted_table_ref(base[0], base[1], dialect)} t0"
+    latest_only = bool(validation.get("latest_only"))
+    dedup_meta = validation.get("dedup_meta_by_table") or {}
+
+    def _relation(schema_name: str, table_name: str) -> str:
+        # When latest_only is on, each source relation becomes a "newest row per key" subquery so
+        # joins/SELECT run over already-deduped rows (PK unique + every join collapses to 1:1).
+        meta = dedup_meta.get((schema_name, table_name)) if latest_only else None
+        if meta:
+            return _dedup_relation_sql(
+                schema_name,
+                table_name,
+                dedup_key=meta["dedup_key"],
+                recency=meta["recency"],
+                tiebreak=meta.get("tiebreak"),
+                dialect_name=dialect,
+            )
+        return _quoted_table_ref(schema_name, table_name, dialect)
+
+    from_sql = f"{_relation(base[0], base[1])} t0"
     if not plan:
         return from_sql, {base: "t0"}
     alias_by_table = plan["alias_by_table"]
@@ -395,7 +485,7 @@ def build_type_b_from_clause(
         right_alias = alias_by_table[p["right_st"]]
         join_kw = "LEFT JOIN" if p["type"] == "left" else "INNER JOIN"
         from_sql += (
-            f" {join_kw} {_quoted_table_ref(p['rs'], p['rt'], dialect)} {right_alias}"
+            f" {join_kw} {_relation(p['rs'], p['rt'])} {right_alias}"
             f" ON {left_alias}.{_q(p['lc'])} = {right_alias}.{_q(p['rc'])}"
         )
     return from_sql, alias_by_table
@@ -412,7 +502,12 @@ def type_b_qualified_column(
 def validate_type_b_mapping(
     db: Session,
     data_model_in: DataModelCreate,
+    *,
+    latest_from_relationships: bool = False,
 ) -> dict[str, Any]:
+    # ``latest_from_relationships`` is True ONLY for saved-model reconstruction (outbound / saved
+    # mapped-preview), where the dedup flag lives in the persisted relationships JSON rather than a
+    # top-level field. On create/edit it stays False so the explicit top-level field is authoritative.
     errors: list[dict[str, str]] = []
     warnings: list[dict[str, str]] = []
 
@@ -478,6 +573,13 @@ def validate_type_b_mapping(
         )
     base = (primary_attribute["source_schema"], primary_attribute["source_table"])
 
+    # "Latest version only" dedup config (Type B). When on, the builder wraps each source relation
+    # in a newest-row-per-key subquery, so the PK/right-key uniqueness guards below are relaxed
+    # (the dedup makes them structurally unique) - but recency must still exist + be sortable.
+    latest_only, recency_column = _extract_latest_config(
+        data_model_in, allow_relationship_fallback=latest_from_relationships
+    )
+
     # Multi-table: validate the join graph (connectivity from base, type-match, fan-out guard).
     # Single-table (no relationships, every attribute on the base) → join_plan is None.
     join_plan = _resolve_join_plan(
@@ -487,6 +589,7 @@ def validate_type_b_mapping(
         base=base,
         errors=errors,
         warnings=warnings,
+        latest_only=latest_only,
     )
     if errors:
         raise TypeBMappingError(errors)
@@ -564,7 +667,10 @@ def validate_type_b_mapping(
             warnings.append({"field": "primary_key", "message": NULLABLE_PRIMARY_KEY_WARNING})
         if _primary_key_null_count(db, base[0], base[1], pk_info["column_name"]):
             warnings.append({"field": "primary_key", "message": PRIMARY_KEY_NULL_VALUES_WARNING})
-        if _column_not_unique(db, base[0], base[1], pk_info["column_name"]):
+        # latest_only dedups the base by its PK source column (DISTINCT ON), so a base with several
+        # rows per key becomes one-row-per-key -> the uniqueness error no longer applies. Without
+        # dedup this stays a hard error.
+        if not latest_only and _column_not_unique(db, base[0], base[1], pk_info["column_name"]):
             errors.append(
                 {
                     "field": "primary_key",
@@ -578,6 +684,55 @@ def validate_type_b_mapping(
     if errors:
         raise TypeBMappingError(errors)
 
+    # Resolve the per-table dedup metadata (base PK + each join's right key) and validate the
+    # recency column exists + is sortable in every deduped table. This is the only place that can
+    # raise the ``recency_column`` field error - no silent fallback.
+    dedup_meta_by_table: dict[tuple[str, str], dict[str, Any]] = {}
+    if latest_only:
+        recency_column = recency_column or DEFAULT_RECENCY_COLUMN
+        # recency_column ends up quoted into the dedup ORDER BY - identifier-validate it explicitly
+        # (defence in depth on top of the per-table existence check) so an unsafe string can never
+        # reach generated SQL, exactly like the join columns above.
+        try:
+            validate_identifier(recency_column, "recency_column")
+        except DbBrowserValidationError as exc:
+            raise TypeBMappingError([{"field": "recency_column", "message": str(exc)}]) from exc
+        base_pk_column = source_column_by_attribute[primary_key]["column_name"]
+        dedup_targets: dict[tuple[str, str], str] = {base: base_pk_column}
+        if join_plan:
+            for p in join_plan["joins"]:
+                dedup_targets[p["right_st"]] = p["rc"]
+        for st, dedup_key in dedup_targets.items():
+            cols = _table_cols(st)
+            rec_info = cols.get(recency_column)
+            if rec_info is None:
+                errors.append({
+                    "field": "recency_column",
+                    "message": (
+                        f"Recency column '{recency_column}' not found in {st[0]}.{st[1]} - pick a "
+                        "timestamp/number column that exists in every deduplicated table."
+                    ),
+                })
+                continue
+            if not _is_sortable_recency(rec_info["data_type"]):
+                errors.append({
+                    "field": "recency_column",
+                    "message": (
+                        f"Recency column '{recency_column}' in {st[0]}.{st[1]} is not sortable "
+                        f"(need timestamp/date/number), got {rec_info['data_type']}."
+                    ),
+                })
+                continue
+            # A stable surrogate id makes DISTINCT ON deterministic when recency ties; skip if none.
+            tiebreak = "id" if ("id" in cols and "id" not in {dedup_key, recency_column}) else None
+            dedup_meta_by_table[st] = {
+                "dedup_key": dedup_key,
+                "recency": recency_column,
+                "tiebreak": tiebreak,
+            }
+        if errors:
+            raise TypeBMappingError(errors)
+
     return {
         "status": "success",
         "message": "Type B mapping is valid",
@@ -586,6 +741,9 @@ def validate_type_b_mapping(
         "source_table": base[1],
         "join_plan": join_plan,
         "mapped_columns": mapped_columns,
+        "latest_only": latest_only,
+        "recency_column": recency_column if latest_only else None,
+        "dedup_meta_by_table": dedup_meta_by_table,
     }
 
 
@@ -595,8 +753,11 @@ def preview_type_b_mapping(
     *,
     limit: int = 20,
     offset: int = 0,
+    latest_from_relationships: bool = False,
 ) -> dict[str, Any]:
-    validation = validate_type_b_mapping(db, data_model_in)
+    validation = validate_type_b_mapping(
+        db, data_model_in, latest_from_relationships=latest_from_relationships
+    )
     return _preview_mapping(
         db,
         model_name=data_model_in.name,
@@ -635,7 +796,10 @@ def preview_saved_type_b_model(
         "status": data_model.status,
     }
     data_model_in = DataModelCreate.model_validate(payload)
-    return preview_type_b_mapping(db, data_model_in, limit=limit, offset=offset)
+    # Saved model: the dedup flag lives in the persisted relationships JSON, not a top-level field.
+    return preview_type_b_mapping(
+        db, data_model_in, limit=limit, offset=offset, latest_from_relationships=True
+    )
 
 
 def _preview_mapping(

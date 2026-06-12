@@ -10,7 +10,12 @@ from app.models.transaction import Transaction
 from app.schemas.data_model import DataModelCreate, DataModelUpdate
 from app.services import table_generator
 from app.services.table_generator import TableGenerationError
-from app.services.type_b_mapping_service import validate_type_b_mapping
+from app.services.type_b_mapping_service import (
+    DEFAULT_RECENCY_COLUMN,
+    LATEST_CONFIG_TYPE,
+    _read_latest_config,
+    validate_type_b_mapping,
+)
 
 
 def get_data_model(db: Session, data_model_id: uuid.UUID) -> DataModel | None:
@@ -64,6 +69,31 @@ def _payload_from_create(data_model_in: DataModelCreate) -> dict[str, Any]:
     return payload
 
 
+def _embed_latest_config(payload: dict[str, Any]) -> None:
+    """Move the Type B dedup config (``latest_only``/``recency_column`` input fields) INTO the
+    ``relationships`` JSON so it persists with no new DB column, then drop the input keys so they
+    are never passed to the ORM constructor/setattr. Idempotent: any prior ``latest_config`` entry
+    is replaced. When the toggle is off the entry is omitted - relationships stays exactly as it
+    was before this feature (no behaviour change for existing models)."""
+    latest_only = bool(payload.pop("latest_only", False))
+    recency_column = payload.pop("recency_column", None)
+    relationships = [
+        relationship
+        for relationship in (payload.get("relationships") or [])
+        if not (isinstance(relationship, dict) and relationship.get("type") == LATEST_CONFIG_TYPE)
+    ]
+    if latest_only:
+        # Persist the EFFECTIVE recency column (default updated_at) so the stored entry and
+        # DataModelRead.recency_column match the column the dedup actually sorts by.
+        entry: dict[str, Any] = {
+            "type": LATEST_CONFIG_TYPE,
+            "latest_only": True,
+            "recency_column": recency_column or DEFAULT_RECENCY_COLUMN,
+        }
+        relationships.append(entry)
+    payload["relationships"] = relationships or None
+
+
 def _payload_from_model(data_model: DataModel) -> dict[str, Any]:
     return {
         "name": data_model.name,
@@ -85,6 +115,10 @@ def _payload_from_model(data_model: DataModel) -> dict[str, Any]:
         "generated_table": data_model.generated_table,
         "attributes": data_model.attributes,
         "relationships": data_model.relationships,
+        # Surface the persisted dedup config so a partial Edit that does not resend these fields
+        # still preserves them through the merge below (instead of silently turning the toggle off).
+        "latest_only": _read_latest_config(data_model.relationships)[0],
+        "recency_column": _read_latest_config(data_model.relationships)[1],
         "refresh_policy": data_model.refresh_policy,
         "sensitivity_level": data_model.sensitivity_level,
         "ai_enabled": data_model.ai_enabled,
@@ -123,6 +157,9 @@ def create_data_model(db: Session, data_model_in: DataModelCreate) -> DataModel:
             validate_type_b_mapping(db, data_model_in)
             payload["generated_table"] = None
 
+        # Fold the dedup config into relationships and drop the input-only keys before the ORM
+        # constructor (DataModel has no latest_only/recency_column column). No-op for Type A.
+        _embed_latest_config(payload)
         data_model = DataModel(**payload)
         db.add(data_model)
         db.flush()
@@ -148,6 +185,9 @@ def update_data_model(
     if validated.type == "B":
         validate_type_b_mapping(db, validated)
     update_payload.pop("generated_table", None)
+    # Fold the dedup config into relationships and drop the input-only keys (re-injecting replaces
+    # any stale entry, so editing never accumulates duplicate latest_config entries).
+    _embed_latest_config(update_payload)
     for field, value in update_payload.items():
         setattr(data_model, field, value)
 

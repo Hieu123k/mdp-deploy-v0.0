@@ -247,6 +247,8 @@ export type DataModel = {
   attributes: DataModelAttribute[];
   source_schema?: string | null; // computed (Type B)
   source_table?: string | null; // computed (Type B)
+  latest_only?: boolean; // computed (Type B dedup, prompt 50)
+  recency_column?: string | null; // computed (Type B dedup, prompt 50)
   status: string;
   created_at: string;
   updated_at: string;
@@ -305,6 +307,9 @@ export type DataModelCreate = {
   ai_enabled?: boolean;
   status?: string | null;
   attributes: DataModelAttribute[];
+  // Type B "latest version only" dedup (prompt 50). Omitted => off / default behaviour.
+  latest_only?: boolean;
+  recency_column?: string | null;
 };
 
 export const listDataModels = () => req<DataModel[]>("/data-models");

@@ -147,7 +147,10 @@ def saved_type_b_payload(model: DataModel) -> DataModelCreate:
 
 def validate_type_b_outbound_mapping(db: Session, model: DataModel) -> dict[str, Any]:
     try:
-        return validate_type_b_mapping(db, saved_type_b_payload(model))
+        # Saved model: the dedup flag lives in the persisted relationships JSON, not a top-level field.
+        return validate_type_b_mapping(
+            db, saved_type_b_payload(model), latest_from_relationships=True
+        )
     except TypeBMappingError as exc:
         raise OutboundValidationError(exc.errors) from exc
 
