@@ -9,7 +9,13 @@ from app.api.deps import get_current_user, require_admin, require_permission
 from app.db.session import get_db
 from app.models.data_model import DataModel
 from app.models.user import User
-from app.schemas.data_model import DataModelCreate, DataModelRead, DataModelUpdate
+from app.schemas.data_model import (
+    DataModelCreate,
+    DataModelRead,
+    DataModelUpdate,
+    TypeBGenerateSqlRequest,
+    TypeBParseSqlRequest,
+)
 from app.services.data_model_service import (
     create_data_model,
     deactivate_data_model,
@@ -25,6 +31,11 @@ from app.services.type_b_mapping_service import (
     preview_saved_type_b_model,
     preview_type_b_mapping,
     validate_type_b_mapping,
+)
+from app.services.type_b_sql_service import (
+    TypeBSqlError,
+    generate_type_b_sql,
+    parse_type_b_sql,
 )
 
 
@@ -122,6 +133,50 @@ def preview_type_b_mapping_endpoint(
     try:
         return preview_type_b_mapping(db, data_model_in, limit=limit, offset=offset)
     except TypeBMappingError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=exc.errors,
+        ) from exc
+
+
+@router.post("/type-b/parse-sql")
+def parse_type_b_sql_endpoint(
+    body: TypeBParseSqlRequest,
+    db: Annotated[Session, Depends(get_db)],
+) -> dict:
+    # READ-ONLY: parses the SQL to an AST and maps it to the builder plan. NEVER executes the user's
+    # SQL. (When a primary key is supplied it also runs the read-only Type B validator, which may issue
+    # lightweight LIMIT-1/COUNT probes against the source tables for non-blocking warnings.)
+    try:
+        return parse_type_b_sql(
+            db,
+            body.sql,
+            primary_key=body.primary_key,
+            latest_only=body.latest_only,
+            recency_column=body.recency_column,
+        )
+    except TypeBSqlError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=exc.errors,
+        ) from exc
+
+
+@router.post("/type-b/generate-sql")
+def generate_type_b_sql_endpoint(
+    body: TypeBGenerateSqlRequest,
+) -> dict:
+    # Pure plan -> SQL text rendering; no DB access, no execution.
+    try:
+        return generate_type_b_sql(
+            base=body.base,
+            attributes=body.attributes,
+            relationships=body.relationships,
+            primary_key=body.primary_key,
+            latest_only=body.latest_only,
+            recency_column=body.recency_column,
+        )
+    except TypeBSqlError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=exc.errors,

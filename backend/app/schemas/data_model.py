@@ -302,3 +302,24 @@ class DataModelTemplateCreateModelResponse(BaseModel):
     status: str
     data_model: DataModelRead
     warnings: list[dict[str, str]] = []
+
+
+class TypeBParseSqlRequest(BaseModel):
+    """Prompt 52: a subset SELECT to parse into the builder plan (NEVER executed). primary_key /
+    latest_only / recency_column are builder toggles carried through so the round-trip preserves them."""
+
+    sql: str
+    primary_key: str | None = Field(default=None, max_length=150)
+    latest_only: bool = False
+    recency_column: str | None = Field(default=None, max_length=150)
+
+
+class TypeBGenerateSqlRequest(BaseModel):
+    """Prompt 52: the structured builder plan to render as canonical subset SQL text (no DB access)."""
+
+    base: dict[str, Any] | None = None
+    attributes: list[dict[str, Any]] = Field(default_factory=list)
+    relationships: list[dict[str, Any]] | None = None
+    primary_key: str | None = Field(default=None, max_length=150)
+    latest_only: bool = False
+    recency_column: str | None = Field(default=None, max_length=150)

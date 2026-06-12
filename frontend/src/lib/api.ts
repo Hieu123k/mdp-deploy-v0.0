@@ -375,6 +375,42 @@ export const previewTypeBMapping = (body: DataModelCreate, limit = 20) =>
 export const previewSavedTypeBModel = (id: string, limit = 20) =>
   req<ModelPreview>(`/data-models/${id}/mapped-preview?limit=${limit}`);
 
+// Type B SQL surface (prompt 52). parse-sql NEVER executes the SQL - it only maps a subset SELECT
+// to the builder plan; generate-sql renders the plan back to canonical SQL text.
+export type TypeBSqlPlan = {
+  status: string;
+  selected_tables: { schema: string; table: string }[];
+  base: { schema: string; table: string };
+  relationships: TypeBJoin[];
+  attributes: DataModelAttribute[];
+  primary_key: string | null;
+  latest_only: boolean;
+  recency_column: string | null;
+  warnings: { field: string; message: string }[];
+};
+export const parseTypeBSql = (body: {
+  sql: string;
+  primary_key?: string | null;
+  latest_only?: boolean;
+  recency_column?: string | null;
+}) =>
+  req<TypeBSqlPlan>("/data-models/type-b/parse-sql", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+export const generateTypeBSql = (body: {
+  base?: { schema: string; table: string } | null;
+  attributes: DataModelAttribute[];
+  relationships?: TypeBJoin[] | null;
+  primary_key?: string | null;
+  latest_only?: boolean;
+  recency_column?: string | null;
+}) =>
+  req<{ sql: string }>("/data-models/type-b/generate-sql", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+
 // DB Browser
 export type DbTable = { table_name: string; table_type: string };
 export type DbColumn = {

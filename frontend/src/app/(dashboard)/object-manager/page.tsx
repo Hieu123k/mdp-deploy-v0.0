@@ -28,10 +28,13 @@ import {
   listTables,
   normalizePgType,
   outbound,
+  parseTypeBSql,
+  generateTypeBSql,
   previewSavedTypeBModel,
   previewTypeBMapping,
   updateDataModel,
   validateTypeBMapping,
+  type TypeBSqlPlan,
   type AttrType,
   type DataModel,
   type DataModelAttribute,
@@ -492,6 +495,14 @@ export default function DataModelsPage() {
   const [sourceSchema, setSourceSchema] = useState("");
   const [sourceTable, setSourceTable] = useState("");
   const [columns, setColumns] = useState<DbColumn[]>([]);
+  // Prompt 52: the SQL surface, kept in two-way sync with the builder. `sqlFocused` (state) drives the
+  // builder->SQL effect; `sqlFocusedRef` is the synchronous guard the SQL->builder effect reads so a
+  // programmatic regenerate (from the builder) never re-parses and loops.
+  const [sqlText, setSqlText] = useState("");
+  const [sqlError, setSqlError] = useState<string | null>(null);
+  const [sqlWarnings, setSqlWarnings] = useState<string[]>([]);
+  const [sqlFocused, setSqlFocused] = useState(false);
+  const sqlFocusedRef = useRef(false);
   // Lazy caches so the table checkbox picker, joins editor, and per-attribute Source table/column
   // dropdowns can list tables/columns for ANY selected table. Keyed `${schema}.${table}`.
   const [tablesBySchema, setTablesBySchema] = useState<Record<string, DbTable[]>>({});
@@ -587,6 +598,117 @@ export default function DataModelsPage() {
         .finally(() => colFetchRef.current.delete(key));
     }
   }, [mode, form.type, selectedTables, sourceTable, columnsByTable]);
+
+  // ---- Prompt 52: SQL <-> builder two-way sync -----------------------------------------------
+  // A normalized signature of the builder plan; changes here drive the builder->SQL regenerate.
+  const builderPlanKey = useMemo(
+    () =>
+      JSON.stringify({
+        s: sourceSchema,
+        t: sourceTable,
+        r: form.relationships,
+        a: form.attributes.map((x) => [x.name, x.source_schema, x.source_table, x.source_column, x.data_type]),
+        lo: form.latest_only,
+        rc: form.recency_column,
+        pk: form.primary_key,
+      }),
+    [sourceSchema, sourceTable, form.relationships, form.attributes, form.latest_only, form.recency_column, form.primary_key],
+  );
+
+  // Apply a parsed SQL plan to the builder. primary_key + latest_only/recency stay builder toggles
+  // (never read from the SQL), so the live sync can never wipe them.
+  function applyParsedPlan(plan: TypeBSqlPlan) {
+    setSelectedTables(plan.selected_tables.map((t) => ({ schema: t.schema, table: t.table })));
+    setSourceSchema(plan.base.schema);
+    setSourceTable(plan.base.table);
+    setForm((current) => {
+      const pk = current.primary_key;
+      const attributes = plan.attributes.map((a) => ({
+        name: a.name,
+        display_name: titleize(a.name),
+        data_type: (a.data_type || "text") as AttrType,
+        required: false,
+        source_schema: a.source_schema,
+        source_table: a.source_table,
+        source_column: a.source_column,
+        is_primary_key: a.name === pk,
+      }));
+      return {
+        ...current,
+        relationships: plan.relationships.map((r) => ({ ...r })),
+        attributes: attributes.length ? attributes : current.attributes,
+      };
+    });
+  }
+
+  // builder -> SQL: regenerate the canonical SQL when the builder plan changes, unless the user is
+  // editing the SQL box (then their text is preserved). Debounced; loop-safe (it only writes SQL
+  // while the box is NOT focused, and the SQL->builder effect ignores writes made while unfocused).
+  useEffect(() => {
+    if (!mode || form.type !== "B") return;
+    if (sqlFocused) return;
+    const handle = setTimeout(async () => {
+      try {
+        const payload = buildPayload();
+        const mapped = payload.attributes.filter((a) => a.source_table && a.source_column);
+        if (!mapped.length || !sourceSchema || !sourceTable) {
+          setSqlText("");
+          return;
+        }
+        const res = await generateTypeBSql({
+          base: { schema: sourceSchema, table: sourceTable },
+          attributes: payload.attributes,
+          relationships: payload.relationships,
+          primary_key: payload.primary_key,
+          latest_only: payload.latest_only,
+          recency_column: payload.recency_column,
+        });
+        setSqlText(res.sql);
+      } catch {
+        // generate-sql is a read-only preview; on failure keep the last SQL text.
+      }
+    }, 400);
+    return () => clearTimeout(handle);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [builderPlanKey, sqlFocused, mode, form.type]);
+
+  // SQL -> builder: when the user edits the SQL box, parse it (NEVER executed) and update the
+  // builder; invalid / out-of-subset SQL shows an inline error and leaves the builder untouched.
+  useEffect(() => {
+    if (!mode || form.type !== "B") return;
+    if (!sqlFocusedRef.current) return; // a programmatic regenerate from the builder -> do not re-parse
+    const handle = setTimeout(async () => {
+      if (!sqlText.trim()) {
+        setSqlError(null);
+        return;
+      }
+      try {
+        const plan = await parseTypeBSql({
+          sql: sqlText,
+          primary_key: form.primary_key || undefined,
+          latest_only: form.latest_only,
+          recency_column: form.recency_column || undefined,
+        });
+        setSqlError(null);
+        applyParsedPlan(plan);
+        // Surface the validator's non-blocking warnings (the same checks the builder runs) + a notice
+        // if the SQL re-aliased away the current primary key column (so the PK is not silently lost).
+        const warns = (plan.warnings || []).map((w) => w.message).filter(Boolean);
+        const names = new Set(plan.attributes.map((a) => a.name));
+        if (plan.primary_key && !names.has(plan.primary_key)) {
+          warns.unshift(`Primary key "${plan.primary_key}" is no longer a projected column - set a new primary key in the builder.`);
+        }
+        setSqlWarnings(warns);
+      } catch (e) {
+        const msgs = errorMessages(e).map((m) => m.message).filter(Boolean);
+        setSqlError(msgs.length ? msgs.join("; ") : "Invalid SQL.");
+        setSqlWarnings([]);
+      }
+    }, 400);
+    return () => clearTimeout(handle);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sqlText, mode, form.type]);
+  // --------------------------------------------------------------------------------------------
 
   // The tables joins & attributes may use = exactly the ticked set (deduped).
   const availableTables = useMemo(() => {
@@ -1050,6 +1172,11 @@ export default function DataModelsPage() {
     setSourceSchema("");
     setSourceTable("");
     setColumns([]);
+    sqlFocusedRef.current = false;
+    setSqlFocused(false);
+    setSqlText("");
+    setSqlError(null);
+    setSqlWarnings([]);
     if (!schemas.length) {
       try {
         const items = await listSchemas();
@@ -1086,6 +1213,11 @@ export default function DataModelsPage() {
   async function openEdit(model: DataModel) {
     clearMessages();
     setMode("edit");
+    sqlFocusedRef.current = false;
+    setSqlFocused(false);
+    setSqlText("");
+    setSqlError(null);
+    setSqlWarnings([]);
     const detail = await loadModel(model.id);
     if (!detail) return;
     setSelected(detail);
@@ -1894,7 +2026,55 @@ export default function DataModelsPage() {
         {renderAttributesTable(true)}
         {renderRelationshipsEditor()}
         {renderLatestVersionEditor()}
+        {renderSqlPanel()}
       </DrawerSection>
+    );
+  }
+
+  // Y (prompt 52): the SQL surface, in two-way sync with the builder above. READ-ONLY - the SQL is
+  // parsed to define joins/columns, never executed. PK and "Latest version only" are builder toggles.
+  function renderSqlPanel() {
+    return (
+      <div className="mt-4 rounded-md border border-neutral-200 p-3">
+        <div className="mb-2">
+          <h4 className="text-sm font-semibold text-neutral-700">SQL definition (read-only)</h4>
+          <p className="text-xs text-neutral-500">
+            Define the joins and columns as a single SELECT - it stays in sync with the builder above
+            both ways. The SQL is parsed only, never executed. Primary key and &quot;Latest version
+            only&quot; are set in the builder, not in SQL.
+          </p>
+        </div>
+        <textarea
+          aria-label="Type B SQL"
+          value={sqlText}
+          onChange={(event) => {
+            sqlFocusedRef.current = true;
+            setSqlText(event.target.value);
+          }}
+          onFocus={() => {
+            sqlFocusedRef.current = true;
+            setSqlFocused(true);
+          }}
+          onBlur={() => {
+            sqlFocusedRef.current = false;
+            setSqlFocused(false);
+          }}
+          spellCheck={false}
+          rows={8}
+          placeholder={"SELECT t.col AS name\nFROM mdp_data.base_table t\nLEFT JOIN mdp_data.other o ON t.key = o.key"}
+          className="w-full rounded-md border border-neutral-300 bg-white px-3 py-2 font-mono text-xs text-neutral-900 focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/30"
+        />
+        {sqlError && (
+          <p className="mt-1 rounded bg-danger/10 px-2 py-1 text-xs text-danger" role="alert">{sqlError}</p>
+        )}
+        {!sqlError && sqlWarnings.length > 0 && (
+          <ul className="mt-1 space-y-0.5 rounded border border-amber-200 bg-amber-50 px-2 py-1 text-xs text-amber-800">
+            {sqlWarnings.map((warning, index) => (
+              <li key={index}>{warning}</li>
+            ))}
+          </ul>
+        )}
+      </div>
     );
   }
 
