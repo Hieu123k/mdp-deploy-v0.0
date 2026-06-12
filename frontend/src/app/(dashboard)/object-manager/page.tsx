@@ -183,6 +183,11 @@ function initialForm(): FormState {
   };
 }
 
+// K (prompt 45): a manually-added attribute row starts EMPTY (placeholder), not seeded "code"/"Code".
+function emptyAttribute(isPrimary = false): DataModelAttribute {
+  return { name: "", display_name: "", data_type: "text", required: false, is_primary_key: isPrimary };
+}
+
 function emptyTemplateForm(template?: DataModelTemplate | null): TemplateForm {
   return {
     name: template?.model_name || "",
@@ -733,11 +738,7 @@ export default function DataModelsPage() {
       attributes: [
         ...current.attributes,
         {
-          name: "",
-          display_name: "",
-          data_type: "text",
-          required: false,
-          is_primary_key: false,
+          ...emptyAttribute(),
           source_schema: current.type === "B" ? sourceSchema : undefined,
           source_table: current.type === "B" ? sourceTable : undefined,
         },
@@ -909,6 +910,13 @@ export default function DataModelsPage() {
     if (!payload.primary_key) {
       errors.push({ field: "primary_key", message: "Select a primary key attribute." });
     }
+    // K (prompt 45): ATTRIBUTE is a placeholder now, so a blank attribute name is an explicit error.
+    // (buildPayload drops blank-name rows, so check the form rows directly rather than the payload.)
+    form.attributes.forEach((attribute, index) => {
+      if (!attribute.name.trim()) {
+        errors.push({ field: `attributes[${index}].name`, message: "Attribute name required." });
+      }
+    });
     // Surface duplicate attribute names (the source dropdown can suggest a name that collides) - they
     // make is_primary_key ambiguous and the backend rejects them anyway.
     const seenNames = new Map<string, number>();
@@ -1014,6 +1022,9 @@ export default function DataModelsPage() {
     clearMessages();
     setSelected(null);
     const next = initialForm();
+    // New model defaults to Type B -> start with an empty placeholder attribute (K), not seeded "code".
+    next.attributes = [emptyAttribute(true)];
+    next.primary_key = "";
     setForm(next);
     setMode("create");
     setSelectedTables([]);
@@ -1807,7 +1818,9 @@ export default function DataModelsPage() {
                         checked={isTableSelected(browseSchema, t.table_name)}
                         onChange={() => toggleTable(browseSchema, t.table_name)}
                       />
-                      {t.table_name} <span className="text-neutral-400">{t.table_type}</span>
+                      {/* L (prompt 45): show only the table name. The relkind ("BASE TABLE"/"VIEW")
+                          was confusing next to the "Base" radio, so it is hidden in the UI. */}
+                      {t.table_name}
                     </label>
                   ))
                 )}
@@ -2049,7 +2062,7 @@ export default function DataModelsPage() {
               <TD>
                 <Input
                   aria-label="Attribute name"
-                  placeholder="attribute_name"
+                  placeholder="e.g. name"
                   value={attribute.name}
                   onChange={(event) => updateAttribute(index, { name: snake(event.target.value) })}
                   className="h-8 font-mono text-xs"
@@ -2058,7 +2071,7 @@ export default function DataModelsPage() {
               <TD>
                 <Input
                   aria-label="Display name"
-                  placeholder="Display name"
+                  placeholder="e.g. Name"
                   value={attribute.display_name || ""}
                   onChange={(event) => updateAttribute(index, { display_name: event.target.value })}
                   className="h-8 text-xs"
