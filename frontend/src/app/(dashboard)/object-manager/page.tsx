@@ -170,20 +170,14 @@ function initialForm(): FormState {
     sensitivity_level: "internal",
     ai_enabled: true,
     status: "active",
-    attributes: [
-      {
-        name: "code",
-        display_name: "Code",
-        data_type: "text",
-        required: true,
-        is_primary_key: true,
-      },
-    ],
+    // M (prompt 46): Type A & Type B both start with an EMPTY placeholder attribute (no seeded "code").
+    attributes: [emptyAttribute(true)],
     relationships: [],
   };
 }
 
-// K (prompt 45): a manually-added attribute row starts EMPTY (placeholder), not seeded "code"/"Code".
+// K (prompt 45) / M (prompt 46): a default or manually-added attribute row starts EMPTY (placeholder),
+// not a seeded "code"/"Code" value - for both Type A and Type B.
 function emptyAttribute(isPrimary = false): DataModelAttribute {
   return { name: "", display_name: "", data_type: "text", required: false, is_primary_key: isPrimary };
 }
@@ -304,6 +298,10 @@ const SRC_SEP = "//";
 function tableKey(schema?: string | null, table?: string | null): string {
   return table ? `${schema || ""}${SRC_SEP}${table}` : "";
 }
+
+// N (prompt 46): hide the "Create from Template" entry from the Data Models tab UI only. The handler
+// (openTemplateCreate), the template drawer, the route and the backend are all kept intact.
+const SHOW_CREATE_FROM_TEMPLATE = false;
 
 function cellText(value: unknown): string {
   if (value === null || value === undefined) return "";
@@ -1021,11 +1019,8 @@ export default function DataModelsPage() {
   async function openCreate() {
     clearMessages();
     setSelected(null);
-    const next = initialForm();
-    // New model defaults to Type B -> start with an empty placeholder attribute (K), not seeded "code".
-    next.attributes = [emptyAttribute(true)];
-    next.primary_key = "";
-    setForm(next);
+    // initialForm already starts with an empty placeholder attribute (M) and primary_key="".
+    setForm(initialForm());
     setMode("create");
     setSelectedTables([]);
     setSourceSchema("");
@@ -1244,10 +1239,12 @@ export default function DataModelsPage() {
         subtitle={`Public API: ${apiPath("/data-models")} · Backend route: /data-models.`}
         action={
           <div className="flex flex-wrap gap-2">
-            <Button variant="secondary" onClick={openTemplateCreate}>
-              <ClipboardList size={16} />
-              Create from Template
-            </Button>
+            {SHOW_CREATE_FROM_TEMPLATE && (
+              <Button variant="secondary" onClick={openTemplateCreate}>
+                <ClipboardList size={16} />
+                Create from Template
+              </Button>
+            )}
             <Button onClick={openCreate}>New Data Model</Button>
           </div>
         }
