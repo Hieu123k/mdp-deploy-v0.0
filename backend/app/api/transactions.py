@@ -7,8 +7,12 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_current_user
 from app.db.session import get_db
 from app.models.transaction import Transaction
-from app.schemas.transaction import TransactionRead
-from app.services.transaction_logger import get_transaction, list_transactions
+from app.schemas.transaction import TransactionRead, TransactionStats
+from app.services.transaction_logger import (
+    get_transaction,
+    get_transaction_stats,
+    list_transactions,
+)
 
 
 router = APIRouter(
@@ -37,6 +41,14 @@ def list_transactions_endpoint(
         limit=limit,
         offset=offset,
     )
+
+
+@router.get("/stats", response_model=TransactionStats)
+def get_transaction_stats_endpoint(
+    db: Annotated[Session, Depends(get_db)],
+) -> dict[str, object]:
+    # Declared BEFORE /{transaction_id} so "stats" is not parsed as a UUID path param.
+    return get_transaction_stats(db)
 
 
 @router.get("/{transaction_id}", response_model=TransactionRead)

@@ -1,7 +1,7 @@
 import uuid
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models.transaction import Transaction
@@ -44,6 +44,17 @@ def log_transaction(
 
 def get_transaction(db: Session, transaction_id: uuid.UUID) -> Transaction | None:
     return db.get(Transaction, transaction_id)
+
+
+def get_transaction_stats(db: Session) -> dict[str, Any]:
+    """All-time transaction counts grouped by status (NO limit/cap), so the Dashboard 'Failed' and
+    total reflect every row rather than only the most recent page. Returns
+    ``{"total": <int>, "by_status": {<status>: <int>, ...}}``."""
+    rows = db.execute(
+        select(Transaction.status, func.count()).group_by(Transaction.status)
+    ).all()
+    by_status = {str(row_status): int(count) for row_status, count in rows}
+    return {"total": sum(by_status.values()), "by_status": by_status}
 
 
 def list_transactions(

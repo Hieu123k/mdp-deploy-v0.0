@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Card, CardBody, CardHeader } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
@@ -14,30 +14,53 @@ function statusTone(s: string): BadgeTone {
   return "danger";
 }
 
+// Clamp the typed count to the backend cap (1..500); blank/<=0/non-numeric falls back to 100.
+// Number() (not parseInt) so exponent forms like "1e9" parse as 1e9 -> clamped to 500, not 1.
+const LIMIT_MAX = 500;
+function clampLimit(value: string): number {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 1) return 100;
+  return Math.min(Math.floor(n), LIMIT_MAX);
+}
+
 export default function TransactionsPage() {
   const [items, setItems] = useState<Transaction[]>([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
   const [direction, setDirection] = useState("");
   const [status, setStatus] = useState("");
+  // limitInput is the free-text field; limit is the COMMITTED value (applied on blur/Enter, not on
+  // every keystroke) that actually drives the query - so typing a count does not fire a request per
+  // digit and never flickers the table mid-typing.
+  const [limitInput, setLimitInput] = useState("100");
+  const [limit, setLimit] = useState(100);
+  const reqSeq = useRef(0);
+
+  const commitLimit = useCallback(() => {
+    const clamped = clampLimit(limitInput);
+    setLimitInput(String(clamped));
+    setLimit(clamped);
+  }, [limitInput]);
 
   const reload = useCallback(async () => {
+    // Sequence guard: only the latest request's response is applied, so a slow earlier request can
+    // never overwrite the table with stale rows (out-of-order responses).
+    const seq = ++reqSeq.current;
     setLoading(true);
     setErr(null);
     try {
-      setItems(
-        await listTransactions({
-          limit: 100,
-          direction: direction || undefined,
-          status: status || undefined,
-        }),
-      );
+      const data = await listTransactions({
+        limit,
+        direction: direction || undefined,
+        status: status || undefined,
+      });
+      if (seq === reqSeq.current) setItems(data);
     } catch (e) {
-      setErr(e instanceof ApiError ? e.message : String(e));
+      if (seq === reqSeq.current) setErr(e instanceof ApiError ? e.message : String(e));
     } finally {
-      setLoading(false);
+      if (seq === reqSeq.current) setLoading(false);
     }
-  }, [direction, status]);
+  }, [direction, status, limit]);
   useEffect(() => {
     reload();
   }, [reload]);
@@ -53,9 +76,25 @@ export default function TransactionsPage() {
       <Card>
         <CardHeader
           title="Recent transactions"
-          subtitle={`${items.length} shown`}
+          subtitle={`${items.length} shown (max ${LIMIT_MAX} per load)`}
           action={
-            <div className="flex gap-2">
+            <div className="flex flex-wrap items-end gap-2">
+              <label className="flex flex-col text-xs text-neutral-500">
+                Number of transactions to load
+                <input
+                  type="number"
+                  min={1}
+                  max={LIMIT_MAX}
+                  aria-label="Number of transactions to load"
+                  value={limitInput}
+                  onChange={(e) => setLimitInput(e.target.value)}
+                  onBlur={commitLimit}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") commitLimit();
+                  }}
+                  className="mt-1 h-10 w-44 rounded-md border border-neutral-300 bg-white px-3 text-sm text-neutral-900 focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/30"
+                />
+              </label>
               <Select value={direction} onChange={(e) => setDirection(e.target.value)}>
                 <option value="">all directions</option>
                 <option value="inbound">inbound</option>
@@ -64,7 +103,7 @@ export default function TransactionsPage() {
               <Select value={status} onChange={(e) => setStatus(e.target.value)}>
                 <option value="">all status</option>
                 <option value="success">success</option>
-                <option value="error">error</option>
+                <option value="failed">failed</option>
               </Select>
             </div>
           }

@@ -7,11 +7,11 @@ import { Card, CardBody } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { Boxes, Plug, Repeat, Cable, Database, AlertTriangle } from "lucide-react";
 import {
+  getTransactionStats,
   listApiKeys,
   listConnections,
   listDataModels,
   listTables,
-  listTransactions,
 } from "@/lib/api";
 
 type Stats = {
@@ -21,10 +21,8 @@ type Stats = {
   modelsActive: number;
   apiKeysActive: number;
   connectionsActive: number;
-  txToday: number;
-  txInToday: number;
-  txOutToday: number;
-  txFailed: number;
+  // All-time transaction counts from /transactions/stats (no 500 cap). null = stats call failed.
+  tx: { total: number; success: number; failed: number } | null;
   stagingTables: number;
 };
 
@@ -64,15 +62,15 @@ export default function DashboardPage() {
   useEffect(() => {
     (async () => {
       try {
-        const today = new Date().toISOString().slice(0, 10);
-        const [models, keys, conns, tx, staging] = await Promise.all([
+        // Transaction counts come from /transactions/stats (all-time, no 500 cap). Its own catch
+        // keeps a stats outage from breaking the rest of the Dashboard (cards then show "-").
+        const [models, keys, conns, txStats, staging] = await Promise.all([
           listDataModels().catch(() => []),
           listApiKeys().catch(() => []),
           listConnections().catch(() => []),
-          listTransactions({ limit: 500 }).catch(() => []),
+          getTransactionStats().catch(() => null),
           listTables("mdp_staging").catch(() => []),
         ]);
-        const txToday = tx.filter((t) => (t.created_at || "").slice(0, 10) === today);
         setS({
           modelsTotal: models.length,
           modelsA: models.filter((m) => m.type === "A").length,
@@ -80,10 +78,13 @@ export default function DashboardPage() {
           modelsActive: models.filter((m) => m.status === "active").length,
           apiKeysActive: keys.filter((k) => k.is_active).length,
           connectionsActive: conns.filter((c) => c.status === "active").length,
-          txToday: txToday.length,
-          txInToday: txToday.filter((t) => t.direction === "inbound").length,
-          txOutToday: txToday.filter((t) => t.direction === "outbound").length,
-          txFailed: tx.filter((t) => t.status !== "success").length,
+          tx: txStats
+            ? {
+                total: txStats.total,
+                success: txStats.by_status?.success ?? 0,
+                failed: txStats.by_status?.failed ?? 0,
+              }
+            : null,
           stagingTables: staging.length,
         });
       } catch (e) {
@@ -93,6 +94,9 @@ export default function DashboardPage() {
   }, []);
 
   const v = (n: number | undefined) => (s ? n : "…");
+  // All-time transaction cards: reuse the shared loading placeholder while loading; "-" if the
+  // stats call failed (s.tx === null) so a stats outage never breaks the Dashboard.
+  const txStat = (n: number | undefined) => (s ? (s.tx ? n : "-") : v(n));
 
   return (
     <>
@@ -124,15 +128,15 @@ export default function DashboardPage() {
         <Stat
           href="/transactions"
           icon={<Repeat size={20} />}
-          label="Transactions today"
-          value={v(s?.txToday)}
-          sub={s && <span>in: {s.txInToday} · out: {s.txOutToday}</span>}
+          label="Transactions (all-time)"
+          value={txStat(s?.tx?.total)}
+          sub={s && s.tx && <span>success: {s.tx.success} / failed: {s.tx.failed}</span>}
         />
         <Stat
           href="/transactions"
           icon={<AlertTriangle size={20} />}
           label="Failed (all-time)"
-          value={v(s?.txFailed)}
+          value={txStat(s?.tx?.failed)}
         />
         <Stat
           href="/jde"

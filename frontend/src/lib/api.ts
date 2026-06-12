@@ -702,6 +702,10 @@ export const listTransactions = (
   return req<Transaction[]>(`/transactions?${q.toString()}`);
 };
 
+// All-time transaction counts grouped by status (no 500 cap) - powers the Dashboard cards.
+export type TransactionStats = { total: number; by_status: Record<string, number> };
+export const getTransactionStats = () => req<TransactionStats>("/transactions/stats");
+
 // Inbound / Outbound — these integration routes return the {code,message,data} envelope (prompt 41).
 // We UNWRAP `data` here so the FE consumers keep the same raw shape (non-regression).
 export type ApiEnvelope<T> = { code: number; message: string; data: T };

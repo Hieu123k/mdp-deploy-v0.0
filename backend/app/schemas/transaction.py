@@ -5,6 +5,13 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict
 
 
+class TransactionStats(BaseModel):
+    """All-time transaction counts grouped by status (no row cap). Powers the Dashboard cards."""
+
+    total: int
+    by_status: dict[str, int]
+
+
 class TransactionRead(BaseModel):
     id: uuid.UUID
     direction: str
