@@ -218,6 +218,7 @@ export default function UsersPage() {
           {formErr && <p className="rounded-md bg-danger/10 px-3 py-2 text-sm text-danger">{formErr}</p>}
           <Input
             label="User Name"
+            requiredMark
             value={fUsername}
             disabled={mode === "edit"}
             onChange={(e) => setFUsername(e.target.value)}
@@ -231,6 +232,7 @@ export default function UsersPage() {
           />
           <Input
             label="Email"
+            requiredMark
             value={fEmail}
             onChange={(e) => setFEmail(e.target.value)}
             placeholder="jdoe@avenue.local"
@@ -244,6 +246,7 @@ export default function UsersPage() {
           </Select>
           <Input
             label={mode === "edit" ? "Password (blank = keep current)" : "Password"}
+            requiredMark={mode !== "edit"}
             type="password"
             value={fPwd}
             onChange={(e) => setFPwd(e.target.value)}

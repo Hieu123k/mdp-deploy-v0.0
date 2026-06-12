@@ -1,18 +1,22 @@
 import { cn } from "@/lib/utils";
 import type { InputHTMLAttributes, ReactNode } from "react";
+import { RequiredMark } from "@/components/ui/RequiredMark";
 
 export interface InputProps extends InputHTMLAttributes<HTMLInputElement> {
   label?: ReactNode;
   hint?: ReactNode;
+  /** Show a red "*" after the label (prompt 47). Visual only - does NOT set native `required`. */
+  requiredMark?: boolean;
 }
 
 /** Standard Input — placeholder DIMMED (neutral-400) per MoM #4 (see globals.css). */
-export function Input({ label, hint, className, id, ...props }: InputProps) {
+export function Input({ label, hint, requiredMark, className, id, ...props }: InputProps) {
   return (
     <label className="block">
       {label && (
         <span className="mb-1.5 block text-sm font-medium text-neutral-700">
           {label}
+          {requiredMark && <RequiredMark />}
         </span>
       )}
       <input

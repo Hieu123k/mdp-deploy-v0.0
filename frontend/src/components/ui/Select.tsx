@@ -1,16 +1,20 @@
 import { cn } from "@/lib/utils";
 import type { SelectHTMLAttributes, ReactNode } from "react";
+import { RequiredMark } from "@/components/ui/RequiredMark";
 
 export interface SelectProps extends SelectHTMLAttributes<HTMLSelectElement> {
   label?: ReactNode;
+  /** Show a red "*" after the label (prompt 47). Visual only - does NOT set native `required`. */
+  requiredMark?: boolean;
 }
 
-export function Select({ label, className, children, id, ...props }: SelectProps) {
+export function Select({ label, requiredMark, className, children, id, ...props }: SelectProps) {
   return (
     <label className="block">
       {label && (
         <span className="mb-1.5 block text-sm font-medium text-neutral-700">
           {label}
+          {requiredMark && <RequiredMark />}
         </span>
       )}
       <select

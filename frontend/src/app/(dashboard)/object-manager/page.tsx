@@ -10,6 +10,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Modal } from "@/components/ui/Modal";
 import { Input } from "@/components/ui/Input";
 import { Select } from "@/components/ui/Select";
+import { RequiredMark } from "@/components/ui/RequiredMark";
 import { Table, THead, TBody, TR, TH, TD } from "@/components/ui/Table";
 import {
   ApiError,
@@ -1540,6 +1541,7 @@ export default function DataModelsPage() {
               <div className="grid gap-3 md:grid-cols-[minmax(260px,360px)_1fr]">
                 <Select
                   label="Template"
+                  requiredMark
                   value={selectedTemplateKey}
                   onChange={(event) => changeTemplate(event.target.value)}
                 >
@@ -1676,9 +1678,10 @@ export default function DataModelsPage() {
 
         <DrawerSection title="Basic Information">
           <div className="grid gap-3 md:grid-cols-2">
-            <Input label="Display name" placeholder="Human-readable name" value={form.display_name} onChange={(event) => patchForm({ display_name: event.target.value })} />
+            <Input label="Display name" requiredMark placeholder="Human-readable name" value={form.display_name} onChange={(event) => patchForm({ display_name: event.target.value })} />
             <Input
               label="Name"
+              requiredMark
               placeholder="lowercase_snake_case"
               value={form.name}
               disabled={mode === "edit"}
@@ -1786,7 +1789,7 @@ export default function DataModelsPage() {
         {/* H: one place to choose every table this model reads from. Tick across schemas; mark one Base. */}
         <div className="mb-3 rounded-md border border-neutral-200 p-3">
           <div className="mb-2">
-            <h4 className="text-sm font-semibold text-neutral-700">Source tables</h4>
+            <h4 className="text-sm font-semibold text-neutral-700">Source tables<RequiredMark /></h4>
             <p className="text-xs text-neutral-500">
               Tick every table this model reads from (you can tick across schemas). Mark one as
               <span className="font-medium"> Base</span> (the table that holds the primary key).
@@ -1908,6 +1911,7 @@ export default function DataModelsPage() {
                   </Select>
                   <Select
                     label="Left table"
+                    requiredMark
                     value={join.left.table}
                     onChange={(event) => updateJoin(index, { left: { table: event.target.value, column: "" } })}
                     className={cn("h-8 min-w-[180px] font-mono text-[11px]", join.left.table ? "" : "text-neutral-400")}
@@ -1919,6 +1923,7 @@ export default function DataModelsPage() {
                   </Select>
                   <Select
                     label="Left key column"
+                    requiredMark
                     value={join.left.column}
                     onChange={(event) => updateJoin(index, { left: { ...join.left, column: event.target.value } })}
                     className={cn("h-8 min-w-[160px] font-mono text-[11px]", join.left.column ? "" : "text-neutral-400")}
@@ -1930,6 +1935,7 @@ export default function DataModelsPage() {
                   </Select>
                   <Select
                     label="Right table"
+                    requiredMark
                     value={tableKey(join.right.schema, join.right.table)}
                     onChange={(event) => {
                       const [schema, table] = event.target.value ? event.target.value.split(SRC_SEP) : ["", ""];
@@ -1944,6 +1950,7 @@ export default function DataModelsPage() {
                   </Select>
                   <Select
                     label="Right key column"
+                    requiredMark
                     value={join.right.column}
                     onChange={(event) => updateJoin(index, { right: { ...join.right, column: event.target.value } })}
                     className={cn("h-8 min-w-[160px] font-mono text-[11px]", join.right.column ? "" : "text-neutral-400")}
@@ -2040,12 +2047,12 @@ export default function DataModelsPage() {
         </colgroup>
         <THead>
           <TR>
-            <TH>Attribute</TH>
+            <TH>Attribute<RequiredMark /></TH>
             <TH>Display Name</TH>
-            <TH>Data Type</TH>
-            {typeB && <TH>Source table / column</TH>}
+            <TH>Data Type<RequiredMark /></TH>
+            {typeB && <TH>Source table / column<RequiredMark /></TH>}
             <TH className="text-center">Required</TH>
-            <TH className="text-center">Primary</TH>
+            <TH className="text-center">Primary<RequiredMark /></TH>
             {!typeB && <TH>Description</TH>}
             <TH className="text-center">Actions</TH>
           </TR>

@@ -129,7 +129,7 @@ export default function JdeTypeBPage() {
         <Card>
           <CardHeader title="1 — Pick a staging source" subtitle={SCHEMA} />
           <CardBody className="space-y-3">
-            <Select label="Source table / view" value={table} onChange={(e) => setTable(e.target.value)}>
+            <Select label="Source table / view" requiredMark value={table} onChange={(e) => setTable(e.target.value)}>
               <option value="">— pick —</option>
               {tables.map((t) => (
                 <option key={t.table_name} value={t.table_name}>
@@ -139,7 +139,7 @@ export default function JdeTypeBPage() {
             </Select>
             {cols.length > 0 && (
               <>
-                <Input label="New model name (snake_case)" value={name} onChange={(e) => setName(e.target.value)} />
+                <Input label="New model name (snake_case)" requiredMark value={name} onChange={(e) => setName(e.target.value)} />
                 <div className="max-h-56 space-y-1 overflow-y-auto rounded-md border border-neutral-200 p-2">
                   <p className="px-1 text-xs text-neutral-500">Columns (✓ include · ● primary key):</p>
                   {cols.map((c) => (

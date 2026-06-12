@@ -249,8 +249,8 @@ export default function ConnectionsPage() {
         <div className="space-y-3">
           {formErr && <p className="rounded-md bg-danger/10 px-3 py-2 text-sm text-danger">{formErr}</p>}
           <div className="grid grid-cols-2 gap-3">
-            <Input label="Name" value={name} onChange={(e) => setName(e.target.value)} placeholder="jde-prod" />
-            <Select label="Type" value={type} onChange={(e) => changeType(e.target.value as ConnType)}>
+            <Input label="Name" requiredMark value={name} onChange={(e) => setName(e.target.value)} placeholder="jde-prod" />
+            <Select label="Type" requiredMark value={type} onChange={(e) => changeType(e.target.value as ConnType)}>
               {CONNECTION_TYPES.map((t) => (
                 <option key={t} value={t}>
                   {t}
@@ -260,9 +260,10 @@ export default function ConnectionsPage() {
           </div>
           {(isDb || isMqtt) && (
             <div className="grid grid-cols-2 gap-3">
-              <Input label="Host" value={host} onChange={(e) => setHost(e.target.value)} placeholder="10.0.0.5" />
+              <Input label="Host" requiredMark value={host} onChange={(e) => setHost(e.target.value)} placeholder="10.0.0.5" />
               <Input
                 label="Port"
+                requiredMark
                 value={port}
                 onChange={(e) => setPort(e.target.value)}
                 placeholder={isMqtt ? "1883" : isOracle ? "1521" : type === "sqlserver" ? "1433" : "5432"}
@@ -274,12 +275,13 @@ export default function ConnectionsPage() {
               <div className="grid grid-cols-2 gap-3">
                 <Input
                   label={isOracle ? "Service name / Database" : "Database"}
+                  requiredMark
                   value={database}
                   onChange={(e) => setDatabase(e.target.value)}
                   placeholder={isOracle ? "JDEPRD" : "prod"}
                   hint={isOracle ? "Default Oracle connect mode uses this as service_name." : undefined}
                 />
-                <Input label="Username" value={username} onChange={(e) => setUsername(e.target.value)} placeholder="reader" />
+                <Input label="Username" requiredMark value={username} onChange={(e) => setUsername(e.target.value)} placeholder="reader" />
               </div>
               <Input
                 label="Password (write-only)"
@@ -297,7 +299,7 @@ export default function ConnectionsPage() {
             </>
           )}
           {isRest && (
-            <Input label="Base URL" value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="https://api.example.com" />
+            <Input label="Base URL" requiredMark value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="https://api.example.com" />
           )}
           {(isDb || isMqtt) && (
             <label className="block">

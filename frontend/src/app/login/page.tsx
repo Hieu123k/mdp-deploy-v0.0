@@ -57,6 +57,7 @@ export default function LoginPage() {
           {err && <p className="rounded-md bg-danger/10 px-3 py-2 text-sm text-danger">{err}</p>}
           <Input
             label="Username"
+            requiredMark
             name="username"
             placeholder="admin"
             autoComplete="username"
@@ -65,6 +66,7 @@ export default function LoginPage() {
           />
           <Input
             label="Password"
+            requiredMark
             name="password"
             type="password"
             placeholder="Password"

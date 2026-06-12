@@ -8,6 +8,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Modal } from "@/components/ui/Modal";
 import { Input } from "@/components/ui/Input";
 import { Select } from "@/components/ui/Select";
+import { RequiredMark } from "@/components/ui/RequiredMark";
 import { Table, THead, TBody, TR, TH, TD } from "@/components/ui/Table";
 import {
   API_DIRECTIONS,
@@ -217,7 +218,7 @@ export default function ApiKeysPage() {
       >
         <div className="space-y-3">
           {formErr && <p className="rounded-md bg-danger/10 px-3 py-2 text-sm text-danger">{formErr}</p>}
-          <Input label="Name" value={name} onChange={(e) => setName(e.target.value)} placeholder="erp-integration" />
+          <Input label="Name" requiredMark value={name} onChange={(e) => setName(e.target.value)} placeholder="erp-integration" />
           <Input
             label="Source system (optional)"
             value={source}
@@ -225,7 +226,7 @@ export default function ApiKeysPage() {
             placeholder="sap"
           />
           <div>
-            <span className="mb-1 block text-sm text-neutral-700">Allowed directions</span>
+            <span className="mb-1 block text-sm text-neutral-700">Allowed directions<RequiredMark /></span>
             <div className="flex gap-4">
               {API_DIRECTIONS.map((d) => (
                 <label key={d} className="flex items-center gap-2 text-sm text-neutral-700">

@@ -904,12 +904,12 @@ export default function MigrationJobsPage() {
         </p>
         <Section title="Overview">
           <div className="grid gap-3 md:grid-cols-2">
-            <Input label="Name" value={jobForm.name} onChange={(e) => setFormValue("name", e.target.value)} disabled={readOnly} />
+            <Input label="Name" requiredMark value={jobForm.name} onChange={(e) => setFormValue("name", e.target.value)} disabled={readOnly} />
             <Input label="Source System" value={jobForm.source_system} onChange={(e) => setFormValue("source_system", e.target.value)} disabled={readOnly} />
-            <Select label="Migration Tool" value={jobForm.migration_tool} onChange={(e) => setFormValue("migration_tool", e.target.value)} disabled={readOnly}>
+            <Select label="Migration Tool" requiredMark value={jobForm.migration_tool} onChange={(e) => setFormValue("migration_tool", e.target.value)} disabled={readOnly}>
               {MIGRATION_TOOLS.map((item) => <option key={item} value={item}>{item}</option>)}
             </Select>
-            <Select label="Load Mode" value={jobForm.load_mode} onChange={(e) => setFormValue("load_mode", e.target.value)} disabled={readOnly}>
+            <Select label="Load Mode" requiredMark value={jobForm.load_mode} onChange={(e) => setFormValue("load_mode", e.target.value)} disabled={readOnly}>
               {MIGRATION_LOAD_MODES.map((item) => <option key={item} value={item}>{titleize(item)}</option>)}
             </Select>
             <Select label="Status" value={jobForm.status} onChange={(e) => setFormValue("status", e.target.value)} disabled={readOnly}>
@@ -923,13 +923,13 @@ export default function MigrationJobsPage() {
         </Section>
         <Section title="Source and Target">
           <div className="grid gap-3 md:grid-cols-2">
-            <Select label="Source Type" value={jobForm.source_type} onChange={(e) => setFormValue("source_type", e.target.value)} disabled={readOnly}>
+            <Select label="Source Type" requiredMark value={jobForm.source_type} onChange={(e) => setFormValue("source_type", e.target.value)} disabled={readOnly}>
               {MIGRATION_SOURCE_TYPES.map((item) => <option key={item} value={item}>{item}</option>)}
             </Select>
             <Input label="Source Schema" value={jobForm.source_schema} onChange={(e) => setFormValue("source_schema", e.target.value)} disabled={readOnly} />
             <Input label="Source Table" value={jobForm.source_table} onChange={(e) => setFormValue("source_table", e.target.value)} disabled={readOnly} />
             <Input label="Target Schema" value={jobForm.target_schema} onChange={(e) => setFormValue("target_schema", e.target.value)} disabled={readOnly} />
-            <Input label="Target Table" value={jobForm.target_table} onChange={(e) => setFormValue("target_table", e.target.value)} disabled={readOnly} />
+            <Input label="Target Table" requiredMark value={jobForm.target_table} onChange={(e) => setFormValue("target_table", e.target.value)} disabled={readOnly} />
             <Input label="Primary Key Columns" value={jobForm.primary_key_columns} onChange={(e) => setFormValue("primary_key_columns", e.target.value)} placeholder="supplier_code, company_code" disabled={readOnly} />
             <Input label="Estimated Rows" value={jobForm.estimated_rows} onChange={(e) => setFormValue("estimated_rows", e.target.value)} disabled={readOnly} />
             <Input label="Estimated Size GB" value={jobForm.estimated_size_gb} onChange={(e) => setFormValue("estimated_size_gb", e.target.value)} disabled={readOnly} />
@@ -985,6 +985,7 @@ export default function MigrationJobsPage() {
               <div className="grid gap-3 md:grid-cols-[minmax(260px,360px)_1fr]">
                 <Select
                   label="Template"
+                  requiredMark
                   value={selectedTemplateKey}
                   onChange={(event) => changeSelectedTemplate(event.target.value)}
                 >

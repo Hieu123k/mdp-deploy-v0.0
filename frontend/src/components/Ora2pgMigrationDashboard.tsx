@@ -406,6 +406,7 @@ export function Ora2pgMigrationDashboard() {
           <div className="min-w-[260px] flex-1">
             <Select
               label="Source table"
+              requiredMark
               value={selected}
               onChange={(e) => setSelected(e.target.value)}
               disabled={busy}
